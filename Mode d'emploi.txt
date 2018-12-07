@@ -1,0 +1,16 @@
+Ce script a pour objectif de modifier l'état de l'alimentation d'une VM.
+
+Les variables à modifier si besoin:
+StopStartVM_TimeOut_Delay = Définit le délai maximum (en secondes) pour un arrêt ou démarrage d'une VM
+ProcessMode = Définit le mode d'exécution du script. Rapide (Quick) ou normal (normal). Ce choix est utile dans le cas d'opération de grande envergure afin d'aller vite. En mode rapide, les LOGS sont trés limités.
+
+Comment compléter le fichier CSV:
+1ére colonne: Indiquer le nom de la VM (nom court)
+2ème colonne: Indiquer le nom du vCenter (FQDN)
+3ème colonne: Indiquer le type d'action à réaliser (PowerOn, PowerOff, Reinit, PowerOffGuest, RebootGuest)
+Dans le détails:
+	. PowerOn permet de démarrer une VM - vmTools non nécessaire
+	. PowerOff permet d'arrêter une VM (brutalement) - vmTools non nécessaire
+	. Reinit permet de réinitialiser une VM (brutalement) - vmTools non nécessaire
+	. PowerOffGuest permet de réaliser une extinction de l'OS - vmTools en éxécution nécessaire
+	. RebootGuest permet de réaliser une redémarrage de l'OS - vmTools en éxécution nécessaire
