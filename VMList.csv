@@ -1,2 +1,6 @@
-Hostname;vCenter;RAM_Targetted;CPU_Targetted
-SWZUDA0SPS19;SWTTYV1VCSYB.yres.ytech;28;4
+Hostname;vCenter;RAM_Targetted;CPU_Targetted;;
+SWZQDB0CEL02;SWTTYV1VCSYB;8;4;;relance manu OK (à modifier dans fichier optim le nbre de CPU
+SWZSDB0CEL02;SWTTYV1VCSYB;8;4;;relance manu OK (à modifier dans fichier optim le nbre de CPU
+SWZSDB0CEL10;SWTTYV1VCSYB;8;4;;relance manu OK (à modifier dans fichier optim le nbre de CPU
+SWZPUB0CEL01;SWTTYV1VCSYB;8;4;;relance manu OK (à modifier dans fichier optim le nbre de CPU
+SWZSUB0CEL02;SWTTYV1VCSYB;8;4;;relance manu OK (à modifier dans fichier optim le nbre de CPU
