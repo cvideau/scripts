@@ -1,4 +1,15 @@
-﻿### V0.4 (novembre 2018) - Développeur: Christophe VIDEAU
+﻿<# Corrections apportées en 0.6
+ * Ajout de l'export au format CSV
+ * Création d'un fichier .lock lors de la première exécution du script qui interdit une nouvelle exécution
+ * Ajout d'un mode DEBUG qui ajoute le n° de ligne du code dans le fichier LOG (Variable "$Mode_Debug". 0=Désactivé 1=Activé)
+ * Ajout d'un bout de code de type "bouchon"
+ * Ajout des nouveaux VCenters dans la commande SWITCH
+ * Initialisation des variables _REF à null en début de chaque fonction
+ * Correction de bugs mineurs
+#>
+
+
+### V0.6 (décembre 2018) - Développeur: Christophe VIDEAU
 # Lien vers couleur Excel https://docs.microsoft.com/en-us/office/vba/images/colorin_za06050819.gif
 # Lien vers couleur Write-Host https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.utility/write-host?view=powershell-6
 $WarningPreference = "SilentlyContinue"
@@ -13,14 +24,59 @@ Import-Module VMware.VimAutomation.HA -WarningAction SilentlyContinue
 [System.Reflection.Assembly]::LoadWithPartialName("System.Windows.Forms") | Out-Null
 Add-PsSnapin VMware.VumAutomation
 Add-PSSnapin -PassThru VMware.VimAutomation.Core
+#$ErrorActionPreference = "SilentlyContinue"
 Clear-Host
 
-Write-Host "Développement (2018) Christophe VIDEAU - Version 0.5`r`n" -ForegroundColor White
+Write-Host "Développement (2018) Christophe VIDEAU - Version 0.6`r`n" -ForegroundColor White
 
-$Global:ElapsedTime_Start = 0; $Global:ElapsedTime_End = 0; $Global:ESX_Compliant = 0; $Global:ESX_NotCompliant = 0
-$Global:no_inc_ESX = 0; $Global:ESX_Counter = 0; $Global:Cluster_Counter = 0; $Global:Cluster_ID = 0
-$Global:Cluster = $NULL
-$Global:ExcelLine_Start = 2		### Démarrage à la 2ème ligne du fichier Excel
+### Déclaration des variables d'environnement
+$VBCrLF							= "`r`n"
+$L								= 0
+$Format_DATE					= Get-Date -UFormat "%Y_%m_%d_%H_%M_%S"
+$Mode_Var						= $Null
+$Mode_Debug						= 1
+
+### Déclaration des variables d'usage
+$Global:ElapsedTime_Start		= 0
+$Global:ElapsedTime_End			= 0
+$Global:ESX_Compliant 			= 0
+$Global:ESX_NotCompliant 		= 0
+$Global:ESX_NotCompliant_Item	= 0
+$Global:ESX_NotCompliant_Total	= 0
+$Global:no_inc_ESX 				= 0
+$Global:ESX_Counter 			= 0
+$Global:Cluster_Counter 		= 0
+$Global:Cluster_ID 				= 0
+$Global:vCenter					= $Null
+$Global:Cluster 				= $Null
+$Global:ExcelLine_Start 		= 2			### Démarrage à la 2ème ligne du fichier Excel
+$Global:ESX_Item_CheckType		= 21		### Nombre de paramètres (colonnes) vérifiés par ESXi
+$Global:Cluster_Item_CheckType	= 11		### Nombre de paramètres (colonnes) vérifiés par clusters
+
+### Déclaration des variables de fichiers
+$Global:ScriptName				= [io.path]::GetFileNameWithoutExtension($MyInvocation.MyCommand.Definition)
+$Global:PathScript 				= ($myinvocation.MyCommand.Definition | Split-Path -parent) + "\"
+$Global:RepLog     				= $PathScript + "LOG\"
+$Global:File_TEMPLATE			= "ESX_Health_Modele.xlsx"
+$Global:File_CSV 				= $RepLog + $ScriptName + "_REF.csv"
+$Global:File_XLSX_DISCOVER_bckp	= "_REF_(BCKP_"+ $Format_DATE + ").xlsx"
+$Global:File_LOG_DISCOVER_bckp	= "_REF_(BCKP_"+ $Format_DATE + ").log"
+$Global:File_CSV_DISCOVER_bckp	= "_REF_(BCKP_"+ $Format_DATE + ").csv"
+$Global:File_XLSX_DISCOVER_work	= "_REF-work.xlsx"
+$Global:File_XLSX_DISCOVER		= "_REF.xlsx"
+$Global:File_XLSX_ONESHOT		= "_ONE_SHOT.xlsx"
+$Global:File_PROCESS_LOCK		= ".lock"
+$Global:File_LOG_DISCOVER		= "_REF_work.log"
+$Global:File_CSV_DISCOVER		= "_REF.csv"
+$Global:File_LOG_ONESHOT		= "_ONE_SHOT.log"
+
+### Déclaration des variabes de sécurité
+$USER       	= "CSP_SCRIPT_ADM"
+$KeyFile     	= "D:\Scripts\Credentials\key.crd"
+$CredentialFile = "D:\Scripts\Credentials\vmware_adm.crd"
+$key        	= Get-content $KeyFile
+$PASSWORD       = Get-Content $CredentialFile | ConvertTo-SecureString -Key $key
+$Credential 	= New-Object System.Management.Automation.PSCredential $USER, $PASSWORD
 
 ### Définition des variables selon les entêtes Excel
 $Excel_Nom_ESX					= 1
@@ -88,8 +144,8 @@ $Excel_Ref_TimeStamp			= 20
 
 
 ### Définition des variables d'utilisation Excel
-$Excel_Couleur_Error		= 3
-$Excel_Couleur_Background	= 15
+$Excel_Couleur_Error			= 3
+$Excel_Couleur_Background		= 15
 
 
 ### Fonction chargée de mesurer le temps de traitement
@@ -110,102 +166,138 @@ Function Get-ESX_HARD { Param( [Parameter(Position = 0, ValueFromPipeline=$True,
 	LogTrace (" * Récupération des valeurs HARDWARE")
 	$ElapsedTime_Start = (Get-Date)
 	
-	$Esxcli2 = Get-ESXCLI -VMHost $ESX.Name -Server $vCenter
-	$ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_Nom_ESX)	= $ESX.Name
+	$ESXCLI = Get-ESXCLI -VMHost $ESX.Name -Server $vCenter
+	$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_Nom_ESX)	= $ESX.Name
 
 	Switch -Wildcard ($vCenter)	{
-		"*VCSZ*" { $ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_ENVironnement) 	= "PRODUCTION" }
-		"*VCSY*" { $ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_ENVironnement) 	= "NON PRODUCTION" }
-		"*VCSQ*" { $ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_ENVironnement) 	= "CLOUD" }
-		"*VCSZY*" { $ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_ENVironnement) 	= "SITES ADMINISTRATIFS" }
-		"*VCSSA*" { $ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_ENVironnement) 	= "BAC A SABLE" }
-		Default	{ $ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_ENVironnement) 	= "NA" }
+		"*VCSZ*" { $ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_ENVironnement)	= "PRODUCTION" }
+		"*VCSY*" { $ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_ENVironnement)	= "NON PRODUCTION" }
+		"*VCSQ*" { $ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_ENVironnement)	= "CLOUD" }
+		"*VCSZY*" { $ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_ENVironnement) 	= "SITES ADMINISTRATIFS" }
+		"*VCSSA*" { $ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_ENVironnement)	= "BAC A SABLE" }
+		"*VCS00*" { $ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_ENVironnement)	= "PVM" }
+		Default	{ $ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_ENVironnement)		= "NA" }
 	}
-	$ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_ENVironnement).Interior.ColorIndex = $Excel_Couleur_Background
+	$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_ENVironnement).Interior.ColorIndex = $Excel_Couleur_Background
 	
 	
-	$ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_HARD_Constructeur)	= $Esxcli2.Hardware.Platform.Get.Invoke().VendorName
-	$ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_HARD_Modele)			= $Esxcli2.Hardware.Platform.Get.Invoke().ProductName
-	$ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_HARD_Num_Serie)		= $Esxcli2.Hardware.Platform.Get.Invoke().SerialNumber
-	$ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_HARD_Version_BIOS)	= $ESX.ExtensionData.Hardware.BiosInfo.BiosVersion
-	$ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_HARD_Date_BIOS)		= $ESX.ExtensionData.Hardware.BiosInfo.ReleaseDate
-	$ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_HARD_Carte_SD)		= $Esxcli2.Storage.Core.Path.List.Invoke().AdapterTransportDetails | Where { $_.Device -eq "mpx.vmhba32:C0:T0:L0" }
+	$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_HARD_Constructeur)	= $ESXCLI.Hardware.Platform.Get.Invoke().VendorName
+	$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_HARD_Modele)			= $ESXCLI.Hardware.Platform.Get.Invoke().ProductName
+	$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_HARD_Num_Serie)		= $ESXCLI.Hardware.Platform.Get.Invoke().SerialNumber
+	$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_HARD_Version_BIOS)	= $ESX.ExtensionData.Hardware.BiosInfo.BiosVersion
+	$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_HARD_Date_BIOS)		= $ESX.ExtensionData.Hardware.BiosInfo.ReleaseDate
+	$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_HARD_Carte_SD)		= $ESXCLI.Storage.Core.Path.List.Invoke().AdapterTransportDetails | Where { $_.Device -eq "mpx.vmhba32:C0:T0:L0" }
 	
 	### Colorisation des cellules
-	$Esxcli2 = Get-ESXCLI -VMHost $ESX.Name -Server $vCenter
-	$ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_Nom_ESX).Interior.ColorIndex 			= $Excel_Couleur_Background
-	$ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_HARD_Constructeur).Interior.ColorIndex	= $Excel_Couleur_Background
-	$ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_HARD_Modele).Interior.ColorIndex 		= $Excel_Couleur_Background
-	$ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_HARD_Num_Serie).Interior.ColorIndex 		= $Excel_Couleur_Background
-	$ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_HARD_Version_BIOS).Interior.ColorIndex 	= $Excel_Couleur_Background
-	$ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_HARD_Date_BIOS).Interior.ColorIndex 		= $Excel_Couleur_Background
-	$ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_HARD_Carte_SD).Interior.ColorIndex 		= $Excel_Couleur_Background
-		
+	$ESXCLI = Get-ESXCLI -VMHost $ESX.Name -Server $vCenter
+	$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_Nom_ESX).Interior.ColorIndex 			= $Excel_Couleur_Background
+	$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_HARD_Constructeur).Interior.ColorIndex	= $Excel_Couleur_Background
+	$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_HARD_Modele).Interior.ColorIndex 		= $Excel_Couleur_Background
+	$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_HARD_Num_Serie).Interior.ColorIndex 		= $Excel_Couleur_Background
+	$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_HARD_Version_BIOS).Interior.ColorIndex 	= $Excel_Couleur_Background
+	$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_HARD_Date_BIOS).Interior.ColorIndex 		= $Excel_Couleur_Background
+	$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_HARD_Carte_SD).Interior.ColorIndex 		= $Excel_Couleur_Background
+	
+	LogTrace ("-- Appel de la fonction 'Get-ElapsedTime'")
 	Get-ElapsedTime
 }
 
 
 ### Fonction chargée de récupérer les valeurs de CONFIGURATION
 Function Get-ESX_CONFIG { Param( [Parameter(Position = 0, ValueFromPipeline=$True, Mandatory=$True)] [String]$vmHost )
+	
+	### Initialisation des variables
+	$Global:ESX_State 		= $Null
+	$Global:oESXTAG 		= $Null
+	$Global:oESX_NTP		= $Null
+	$Global:InstallDate		= $Null
+	$Global:UTC				= $Null
+	$Global:UTC_Var1		= $Null
+	$Global:UTC_Var2		= $Null
+	$Global:Gateway			= $Null
+	$Global:ComplianceLevel = $Null
+	$Global:NTPD_status		= $Null
+
 	Write-Host " * Récupération des valeurs " -NoNewLine
 	Write-Host "CONFIGURATION`t" -NoNewLine -ForegroundColor White
 	LogTrace (" * Récupération des valeurs CONFIGURATION")
 	$ElapsedTime_Start = (Get-Date)
 	
-	$Esxcli2 = Get-ESXCLI -VMHost $ESX.Name -Server $vCenter
+	$ESXCLI = Get-ESXCLI -VMHost $ESX.Name -Server $vCenter
 	$Global:oESXTAG = Get-VMHost -Name $ESX | Get-TagAssignment | Select Tag
 	$Global:oESX_NTP = Get-VMHostNtpServer -VMHost $ESX.Name -Server $vCenter
 	
 	If ((Get-VmHostService -VMHost $ESX -Server $vCenter | Where-Object {$_.key -eq "ntpd"}).Running -eq "True") { $ntpd_status = "Running" } Else { $ntpd_status = "Not Running" }
-	If ($Esxcli2.System.MaintenanceMode.Get.Invoke() -eq "Enabled") { $ESX_State = "Maintenance" } Else { $ESX_State = "Connected" }
-	If ((Get-Compliance -Entity $ESX -Detailed -WarningAction "SilentlyContinue" | WHERE {$_.NotCompliantPatches -ne $NULL} | SELECT Status).Count -gt 0) { $ComplianceLevel = "Baseline - Not compliant" } Else { $ComplianceLevel = "Baseline - Compliant" }
+	If ($ESXCLI.System.MaintenanceMode.Get.Invoke() -eq "Enabled") { $ESX_State = "Maintenance" } Else { $ESX_State = "Connected" }
+	If ((Get-Compliance -Entity $ESX -Detailed -WarningAction "SilentlyContinue" | Where {$_.NotCompliantPatches -ne $Null} | Select Status).Count -gt 0) { $ComplianceLevel = "Baseline - Not compliant" } Else { $ComplianceLevel = "Baseline - Compliant" }
 	$Global:UTC = Get-View -ViewType HostSystem -Filter @{"Name" = $ESX.Name}
 	$Global:UTC_Var1 = $UTC.Config.DateTimeInfo.TimeZone.Name
 	$Global:UTC_Var2 = $UTC.Config.DateTimeInfo.TimeZone.GmtOffset
-	$Global:Gateway = Get-VmHostNetwork -Host $ESX  -Server $vCenter | Select VMkernelGateway -ExpandProperty VirtualNic | Where { $_.VMotionEnabled } | Select -ExpandProperty VMkernelGateway -WarningAction "SilentlyContinue"
+	$Global:Gateway = Get-VmHostNetwork -Host $ESX -Server $vCenter | Select VMkernelGateway -ExpandProperty VirtualNic | Where { $_.VMotionEnabled } | Select -ExpandProperty VMkernelGateway -WarningAction "SilentlyContinue"
 	
 	New-VIProperty -Name EsxInstallDate -ObjectType VMHost -Value { Param($ESX)
 		$Esxcli = Get-Esxcli -VMHost $ESX.Name
 		$Delta = [Convert]::ToInt64($esxcli.system.uuid.get.Invoke().Split('-')[0],16)
 		(Get-Date -Year 1970 -Day 1 -Month 1 -Hour 0 -Minute 0 -Second 0).AddSeconds($delta)
-	} -Force > $NULL
+	} -Force > $Null
 	$InstallDate = $(Get-VMHost -Name $vmhost | Select-Object -ExpandProperty EsxInstallDate)
 	
-	If ($ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_CONF_Etat_ESX).Text -eq "Connected") {
-		If ($ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_CONF_Balise).Text -Like "@*") {
-			If ($oESX_NTP -eq $Gateway) { $ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_CONF_Serveurs_NTP).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_CONF_Serveurs_NTP).Font.Bold = $False } Else { $ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_CONF_Serveurs_NTP).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_CONF_Serveurs_NTP).Font.Bold = $True }
+	If ($ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_CONF_Etat_ESX).Text -eq "Connected") {
+		If ($ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_CONF_Balise).Text -Like "@*") {
+			If ($oESX_NTP -eq $Gateway) {
+				$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_CONF_Serveurs_NTP).Font.ColorIndex = 1
+				$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_CONF_Serveurs_NTP).Font.Bold = $False }
+			Else {
+				$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_CONF_Serveurs_NTP).Font.ColorIndex = $Excel_Couleur_Error
+				$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_CONF_Serveurs_NTP).Font.Bold = $True
+			}
 		}
 	}
 		
-	$ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_CONF_Datacenter)			= "$DC"										# Ligne, Colonne
-	$ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_CONF_Cluster)			= "$Cluster"								# Ligne, Colonne
-	$ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_CONF_Etat_ESX)			= $ESX_State								# Ligne, Colonne
-	$ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_CONF_vCenter)			= $vCenter									# Ligne, Colonne
-	$ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_CONF_Balise)				= "$oESXTAG"								# Ligne, Colonne
-	$ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_CONF_Statut_ESX)			= "PoweredOn"								# Ligne, Colonne
-	$ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_CONF_Version)			= $ESX.Version + " - Build " + $ESX.Build	# Ligne, Colonne
-	$ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_CONF_Date_Installation)	= "'" + $InstallDate						# Ligne, Colonne
-	$ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_CONF_Serveurs_NTP)		= "$oESX_NTP"								# Ligne, Colonne
-	$ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_CONF_Zone_Temps)			= $UTC_Var1 + "+" + $UTC_Var2				# Ligne, Colonne
-	$ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_CONF_Heure_Locale)		= $Esxcli2.Hardware.Clock.Get.Invoke()		# Ligne, Colonne
-	$ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_CONF_Niveau_Compliance)	= $ComplianceLevel							# Ligne, Colonne
-	$ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_CONF_Etat_Demon_NTP)		= $NTPD_status								# Ligne, Colonne
+	$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_CONF_Datacenter)			= "$DC"										# Ligne, Colonne
+	$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_CONF_Cluster)			= "$Cluster"								# Ligne, Colonne
+	$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_CONF_Etat_ESX)			= $ESX_State								# Ligne, Colonne
+	$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_CONF_vCenter)			= $vCenter									# Ligne, Colonne
+	$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_CONF_Balise)				= "$oESXTAG"								# Ligne, Colonne
+	$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_CONF_Statut_ESX)			= "PoweredOn"								# Ligne, Colonne
+	$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_CONF_Version)			= $ESX.Version + " - Build " + $ESX.Build	# Ligne, Colonne
+	$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_CONF_Date_Installation)	= "'" + $InstallDate						# Ligne, Colonne
+	$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_CONF_Serveurs_NTP)		= "$oESX_NTP"								# Ligne, Colonne
+	$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_CONF_Zone_Temps)			= $UTC_Var1 + "+" + $UTC_Var2				# Ligne, Colonne
+	$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_CONF_Heure_Locale)		= $ESXCLI.Hardware.Clock.Get.Invoke()		# Ligne, Colonne
+	$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_CONF_Niveau_Compliance)	= $ComplianceLevel							# Ligne, Colonne
+	$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_CONF_Etat_Demon_NTP)		= $NTPD_status								# Ligne, Colonne
 	
 	### Colorisation des cellules
-	$ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_CONF_Datacenter).Interior.ColorIndex 		= $Excel_Couleur_Background
-	$ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_CONF_Cluster).Interior.ColorIndex			= $Excel_Couleur_Background
-	$ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_CONF_Etat_ESX).Interior.ColorIndex			= $Excel_Couleur_Background
-	$ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_CONF_vCenter).Interior.ColorIndex			= $Excel_Couleur_Background
-	$ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_CONF_Statut_ESX).Interior.ColorIndex			= $Excel_Couleur_Background
-	$ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_CONF_Date_Installation).Interior.ColorIndex	= $Excel_Couleur_Background
-	$ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_CONF_Heure_Locale).Interior.ColorIndex		= $Excel_Couleur_Background
+	$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_CONF_Datacenter).Interior.ColorIndex 		= $Excel_Couleur_Background
+	$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_CONF_Cluster).Interior.ColorIndex			= $Excel_Couleur_Background
+	$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_CONF_Etat_ESX).Interior.ColorIndex			= $Excel_Couleur_Background
+	$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_CONF_vCenter).Interior.ColorIndex			= $Excel_Couleur_Background
+	$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_CONF_Statut_ESX).Interior.ColorIndex			= $Excel_Couleur_Background
+	$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_CONF_Date_Installation).Interior.ColorIndex	= $Excel_Couleur_Background
+	$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_CONF_Heure_Locale).Interior.ColorIndex		= $Excel_Couleur_Background
 	
+	LogTrace ("-- Appel de la fonction 'Get-ElapsedTime'")
 	Get-ElapsedTime
 }
 
 
 ### Fonction chargée de récupérer les valeurs de la configuration SAN
 Function Get-ESX_SAN { Param( [Parameter(Position = 0, ValueFromPipeline=$True, Mandatory=$True)] [String]$vmHost )
+	
+	### Initialisation des variables
+	$Global:Target				= $Null
+	$Global:Target_Count 		= $Null
+	$Global:LUNs				= $Null
+	$Global:nrPaths				= $Null
+	$Global:PathsSum			= $Null
+	$Global:LUNsSum				= $Null
+	$Global:PathsDead_Total		= $Null
+	$Global:PathsActive_Total	= $Null
+	$Global:PathsRedondance		= $Null
+	$Global:PathsDead			= $Null
+	$Global:PathsActive			= $Null	
+	
 	Write-Host " * Récupération des valeurs " -NoNewLine
 	Write-Host "SAN`t`t`t" -NoNewLine -ForegroundColor White
 	LogTrace (" * Récupération des valeurs SAN")
@@ -226,23 +318,23 @@ Function Get-ESX_SAN { Param( [Parameter(Position = 0, ValueFromPipeline=$True, 
 	ForEach($hba in (Get-VMHostHba -VMHost $ESX.Name -Type "FibreChannel")) {
 		$Target = ((Get-View $hba.VMhost).Config.StorageDevice.ScsiTopology.Adapter | Where {$_.Adapter -eq $hba.Key}).Target
 		If ($Target_Count -eq 0) { Continue }
-		$LUNs = Get-ScsiLun -Hba $hba  -LunType "disk" -ErrorAction SilentlyContinue
+		$LUNs = Get-ScsiLun -Hba $hba -LunType "disk" -ErrorAction SilentlyContinue
 		$nrPaths = ($Target | %{$_.Lun.Count} | Measure-Object -Sum).Sum
 		
 		# Boucle déterminant les valeurs des variables pour chacune des interfaces HBA
 		$ArraySAN_Line = (1..$Target_Count)
-		ForEach($l in $ArraySAN_Line)	{
+		ForEach($L in $ArraySAN_Line)	{
 			$ArraySAN_HBAName	+= $hba.Name
 			$ArraySAN_LUNs		+= $LUNS.Count
 			$ArraySAN_Paths		+= $nrPaths
 		}
 		
-		$Esxcli2 = Get-Esxcli -VMHost $ESX -Server $vCenter
-		$ArraySAN_Paths_Active		+= ($Esxcli2.storage.core.path.list.invoke() | Where {($_.State -eq "active") -and ($_.Plugin -eq 'PowerPath') -and ($_.Adapter -eq $hba.Name)}).Count
-		$ArraySAN_Paths_Active_INT 	+= ($Esxcli2.storage.core.path.list.invoke() | Where {($_.State -eq "active") -and ($_.Plugin -eq 'PowerPath') -and ($_.Adapter -eq $hba.Name)}).Count
+		$ESXCLI = Get-Esxcli -VMHost $ESX -Server $vCenter
+		$ArraySAN_Paths_Active		+= ($ESXCLI.storage.core.path.list.invoke() | Where {($_.State -eq "active") -and ($_.Plugin -eq 'PowerPath') -and ($_.Adapter -eq $hba.Name)}).Count
+		$ArraySAN_Paths_Active_INT 	+= ($ESXCLI.storage.core.path.list.invoke() | Where {($_.State -eq "active") -and ($_.Plugin -eq 'PowerPath') -and ($_.Adapter -eq $hba.Name)}).Count
 		
-		$ArraySAN_Paths_Dead		+= ($Esxcli2.storage.core.path.list.invoke() | Where {($_.State -eq "dead") -and ($_.Plugin -eq 'PowerPath') -and ($_.Adapter -eq $hba.Name)}).Count
-		$ArraySAN_Paths_Dead_INT	+= ($Esxcli2.storage.core.path.list.invoke() | Where {($_.State -eq "dead") -and ($_.Plugin -eq 'PowerPath') -and ($_.Adapter -eq $hba.Name)}).Count
+		$ArraySAN_Paths_Dead		+= ($ESXCLI.storage.core.path.list.invoke() | Where {($_.State -eq "dead") -and ($_.Plugin -eq 'PowerPath') -and ($_.Adapter -eq $hba.Name)}).Count
+		$ArraySAN_Paths_Dead_INT	+= ($ESXCLI.storage.core.path.list.invoke() | Where {($_.State -eq "dead") -and ($_.Plugin -eq 'PowerPath') -and ($_.Adapter -eq $hba.Name)}).Count
     }
 
 	If ($ArraySAN_LUNs[1] -eq $ArraySAN_LUNs[2] -and $ArraySAN_Paths[1] -eq $ArraySAN_Paths[2]) { $PathsRedondance = "OK" }
@@ -252,21 +344,33 @@ Function Get-ESX_SAN { Param( [Parameter(Position = 0, ValueFromPipeline=$True, 
 	$PathsDead_Total 	= ($ArraySAN_Paths_Dead_INT[0] + $ArraySAN_Paths_Dead_INT[1])
 	$PathsActive_Total 	= ($ArraySAN_Paths_Active_INT[0] + $ArraySAN_Paths_Active_INT[1])
 	
-	$Global:PathsDead 	= "Total: $PathsDead_Total" + $vbcrlf + "(" + $ArraySAN_HBAName[1] + ": " + $ArraySAN_Paths_Dead[0] + ")" + $vbcrlf + "(" + $ArraySAN_HBAName[2] + ": " + $ArraySAN_Paths_Dead[1] + ")"
-	$Global:PathsActive = "Total: $PathsActive_Total" + $vbcrlf + "(" + $ArraySAN_HBAName[1] + ": " + $ArraySAN_Paths_Active[0] + ")" + $vbcrlf + "(" + $ArraySAN_HBAName[2] + ": " + $ArraySAN_Paths_Active[1] + ")"
+	$Global:PathsDead 	= "Total: $PathsDead_Total" + $VBCrLF + "(" + $ArraySAN_HBAName[1] + ": " + $ArraySAN_Paths_Dead[0] + ")" + $VBCrLF + "(" + $ArraySAN_HBAName[2] + ": " + $ArraySAN_Paths_Dead[1] + ")"
+	$Global:PathsActive = "Total: $PathsActive_Total" + $VBCrLF + "(" + $ArraySAN_HBAName[1] + ": " + $ArraySAN_Paths_Active[0] + ")" + $VBCrLF + "(" + $ArraySAN_HBAName[2] + ": " + $ArraySAN_Paths_Active[1] + ")"
 	
-	$ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_SAN_Total_Chemins) 			= "$PathsSum" + " (" + $Target_Count + " HBA)"		# Ligne, Colonne
-	$ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_SAN_Total_LUNs)				= "$LUNsSum" + " (" + $Target_Count + " HBA)"		# Ligne, Colonne
-	$ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_SAN_Total_Chemins_MORTS) 	= $PathsDead										# Ligne, Colonne
-	$ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_SAN_Total_Chemins_ACTIFS)	= $PathsActive										# Ligne, Colonne
-	$ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_SAN_Redondance_Chemins)		= $PathsRedondance									# Ligne, Colonne
+	$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_SAN_Total_Chemins) 			= "$PathsSum" + " (" + $Target_Count + " HBA)"		# Ligne, Colonne
+	$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_SAN_Total_LUNs)				= "$LUNsSum" + " (" + $Target_Count + " HBA)"		# Ligne, Colonne
+	$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_SAN_Total_Chemins_MORTS) 	= $PathsDead										# Ligne, Colonne
+	$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_SAN_Total_Chemins_ACTIFS)	= $PathsActive										# Ligne, Colonne
+	$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_SAN_Redondance_Chemins)		= $PathsRedondance									# Ligne, Colonne
 	
+	LogTrace ("-- Appel de la fonction 'Get-ElapsedTime'")
 	Get-ElapsedTime
 }
 
 
-### Fonction chargée de récupérer les valeurs de  configuration ESXi
+### Fonction chargée de récupérer les valeurs de configuration ESXi
 Function Get-ESX_HOST { Param( [Parameter(Position = 0, ValueFromPipeline=$True, Mandatory=$True)] [String]$vmHost )
+
+	### Initialisation des variables
+	$Global:CurrentEVCMode	= $Null
+	$Global:MaxEVCMode		= $Null
+	$Global:CPUPerformance	= $Null
+	$Global:HyperThreading	= $Null
+	$Global:Alarm			= $Null
+	$Global:TPS				= $Null
+	$Global:LPages			= $Null
+	$Global:HAEnabled		= $Null
+	
 	Write-Host " * Récupération des valeurs " -NoNewLine
 	Write-Host "HOTE`t`t" -NoNewLine -ForegroundColor White
 	LogTrace (" * Récupération des valeurs HOTE")
@@ -282,20 +386,31 @@ Function Get-ESX_HOST { Param( [Parameter(Position = 0, ValueFromPipeline=$True,
 	If ((Get-AdvancedSetting -Entity $ESX -Name "Mem.AllocGuestLargePage").Value -eq "0") 	{ $LPages = "Disabled" } 	Else { $LPages = "Enabled" }
 	If ((Get-AdvancedSetting -Entity $ESX -Name "Mem.ShareForceSalting").Value -eq "0") 	{ $TPS = "Enabled" } 		Else { $TPS = "Disabled" }
 
-	$ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_HOST_Current_CPU_Policy)		= $CPUPerformance											# Ligne, Colonne
-	$ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_HOST_Mode_HA)				= $HAEnabled												# Ligne, Colonne
-	$ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_HOST_Hyperthreading)			= $HyperThreading											# Ligne, Colonne
-	$ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_HOST_EVC)					= "Current: " + $CurrentEVCMode #+ ", Max: " + $MaxEVCMode	# Ligne, Colonne
-	$ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_HOST_Etat_Alarmes)			= $Alarm													# Ligne, Colonne
-	$ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_HOST_TPS_Salting)			= $TPS														# Ligne, Colonne
-	$ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_HOST_Larges_Pages_RAM)		= $LPages													# Ligne, Colonne
+	$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_HOST_Current_CPU_Policy)		= $CPUPerformance											# Ligne, Colonne
+	$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_HOST_Mode_HA)				= $HAEnabled												# Ligne, Colonne
+	$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_HOST_Hyperthreading)			= $HyperThreading											# Ligne, Colonne
+	$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_HOST_EVC)					= "Current: " + $CurrentEVCMode #+ ", Max: " + $MaxEVCMode	# Ligne, Colonne
+	$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_HOST_Etat_Alarmes)			= $Alarm													# Ligne, Colonne
+	$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_HOST_TPS_Salting)			= $TPS														# Ligne, Colonne
+	$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_HOST_Larges_Pages_RAM)		= $LPages													# Ligne, Colonne
 	
+	LogTrace ("-- Appel de la fonction 'Get-ElapsedTime'")
 	Get-ElapsedTime
 }
 
 
 ### Fonction chargée de récupérer les valeurs de configuration du RESEAU
 Function Get-ESX_NETWORK { Param( [Parameter(Position = 0, ValueFromPipeline=$True, Mandatory=$True)] [String]$vmHost )
+
+	### Initialisation des variables
+	$Global:ESXAdapter		= $Null
+	$Global:ESXAdapterName	= $Null
+	$Global:ESXAdapterCount	= $Null
+	$vLANID_Count			= $Null
+	$vMotionIP				= $Null
+	$vMotionEnabled			= $Null
+	
+	
 	Write-Host " * Récupération des valeurs " -NoNewLine
 	Write-Host "RESEAUX`t`t" -NoNewLine -ForegroundColor White
 	LogTrace (" * Récupération des valeurs RESEAUX")
@@ -314,36 +429,56 @@ Function Get-ESX_NETWORK { Param( [Parameter(Position = 0, ValueFromPipeline=$Tr
 		$vLANID = "(" + $vLANID.Count + ") " + $vLANID + " [Local]"
 	}
 	
-	$Esxcli2 = Get-ESXCLI -VMHost $ESX -Server $vCenter
-	$Global:ESXAdapter 		= $Esxcli2.Network.nic.list.Invoke()	| Where {$_.Link -eq "Up"}
-	$Global:ESXAdapterName 	= $Esxcli2.Network.nic.list.Invoke()	| Where {$_.Link -eq "Up"} | Select Name, Speed, Duplex | Out-String
+	$ESXCLI = Get-ESXCLI -VMHost $ESX -Server $vCenter
+	$Global:ESXAdapter 		= $ESXCLI.Network.nic.list.Invoke()	| Where {$_.Link -eq "Up"}
+	$Global:ESXAdapterName 	= $ESXCLI.Network.nic.list.Invoke()	| Where {$_.Link -eq "Up"} | Select Name, Speed, Duplex | Out-String
 	$Global:ESXAdapterName 	= $ESXAdapterName -Replace "-","" -Replace "Name","" -Replace "Speed","" -Replace "Duplex","" -Replace "`r`n","" -Replace " ","" -Replace "10000", " 10000 " -Replace "vm", "`r`nvm"
-	$Global:ESXAdapterCount = ($Esxcli2.Network.nic.list.Invoke() 	| Where {$_.Link -eq "Up"}).Count
+	$Global:ESXAdapterCount = ($ESXCLI.Network.nic.list.Invoke() 	| Where {$_.Link -eq "Up"}).Count
 	
 	$vMotionIP = Get-VMHostNetworkAdapter -VMHost $ESX | Where {$_.DeviceName -eq "vmk1"} | Select IP | Out-String
 	$vMotionIP = $vMotionIP -Replace "-","" -Replace "IP","" -Replace "`n","" -Replace " ",""
 	$vMotionEnabled = (Get-View -ViewType HostSystem -Filter @{"Name" = $ESX.Name}).Summary.Config.VmotionEnabled
 	If ($vMotionEnabled -eq $True) { $vMotionEnabled = "vMotion enabled" } Else { $vMotionEnabled = "vMotion disabled" }
+	
+	### Colorisation de la cellule s'il n'y a pas d'@ IP de vMotion
+	If ($ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_CONF_Etat_ESX).Text -eq "Connected") {
+		If ($ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_CONF_Balise).Text -Like "@*") {
+			If ($vMotionIP) {
+				$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_NETWORK_vMotion).Font.ColorIndex = 1
+				$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_NETWORK_vMotion).Font.Bold = $False }
+			Else {
+				$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_NETWORK_vMotion).Font.ColorIndex = $Excel_Couleur_Error
+				$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_NETWORK_vMotion).Font.Bold = $True
+				$vMotionIP = "NULL"
+			}
+		}
+	}
 
-	$ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_NETWORK_VLAN)		= $vLANID											# Ligne, Colonne
-	$ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_NETWORK_Adaptateurs) = "(" + $ESXAdapterCount + ") " + $ESXAdapterName	# Ligne, Colonne
-	$ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_NETWORK_vMotion)		= $vMotionIP + " (" + $vMotionEnabled + ")"			# Ligne, Colonne
+	$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_NETWORK_VLAN)		= $vLANID											# Ligne, Colonne
+	$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_NETWORK_Adaptateurs) = "(" + $ESXAdapterCount + ") " + $ESXAdapterName	# Ligne, Colonne
+	$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_NETWORK_vMotion)		= $vMotionIP + " (" + $vMotionEnabled + ")"			# Ligne, Colonne
 	
-	$ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_NETWORK_vMotion).Interior.ColorIndex = $Excel_Couleur_Background
+	$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_NETWORK_vMotion).Interior.ColorIndex = $Excel_Couleur_Background
 	
+	LogTrace ("-- Appel de la fonction 'Get-ElapsedTime'")
 	Get-ElapsedTime
 }
 
 
 ### Fonction chargée de récupérer les valeurs de configuration iLO
 Function Get-HP_ILO { Param( [Parameter(Position = 0, ValueFromPipeline=$True, Mandatory=$True)] [String]$vmHost )
+
+	### Initialisation des variables
+	$iLOversion = $Null
+	
 	Write-Host " * Récupération des valeurs " -NoNewLine
 	Write-Host "ILO`t`t`t" -NoNewLine -ForegroundColor White
 	LogTrace (" * Récupération des valeurs ILO")
 	$ElapsedTime_Start = (Get-Date)
 	
-	$ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_ILO_Version) = $iLOversion # Ligne, Colonne
+	$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_ILO_Version) = $iLOversion # Ligne, Colonne
 	
+	LogTrace ("-- Appel de la fonction 'Get-ElapsedTime'")
 	Get-ElapsedTime
 }
 
@@ -359,6 +494,25 @@ Function Get-ESX_Compare_Full {
 	Write-Host " * Initialisation de la matrice `t`t`t" -NoNewLine -ForegroundColor DarkYellow
 	LogTrace (" * Initialisation de la matrice")
 	$ElapsedTime_Start = (Get-Date)
+	
+	$Ref_ArrayTag 		= $Null
+	$Ref_ArrayVersion	= $Null
+	$Ref_ArrayTimeZone 	= $Null
+	$Ref_ArrayBaseline 	= $Null
+	$Ref_ArrayNTPd	 	= $Null
+	$Ref_ArraySAN 		= $Null
+	$Ref_ArrayLUN 		= $Null
+	$Ref_ArraySANDeath	= $Null
+	$Ref_ArraySANAlive	= $Null
+	$Ref_ArrayCPUPolicy	= $Null
+	$Ref_ArrayHA		= $Null
+	$Ref_ArrayHyperTh	= $Null
+	$Ref_ArrayEVC		= $Null
+	$Ref_ArrayAlarme	= $Null
+	$Ref_ArrayTPS 		= $Null
+	$Ref_ArrayLPages	= $Null
+	$Ref_ArrayVLAN 		= $Null
+	$Ref_ArrayLAN 		= $Null
 
 	$ArrayTag 		= @()	# Initialisation du tableau relatif au TAG
 	$ArrayVersion 	= @()	# Initialisation du tableau relatif à la version ESXi
@@ -369,7 +523,6 @@ Function Get-ESX_Compare_Full {
 	$ArrayLUN 		= @()	# Initialisation du tableau relatif au nombre de LUN
 	$ArraySANDeath	= @()	# Initialisation du tableau relatif au nombre de chemins SAN morts
 	$ArraySANAlive	= @()	# Initialisation du tableau relatif au nombre de chemins SAN alive
-	$ArraySANRedon	= @()	# Initialisation du tableau relatif à la redondance SAN
 	$ArrayCPUPolicy	= @()	# Initialisation du tableau relatif à l'utilisation CPU
 	$ArrayHA		= @()	# Initialisation du tableau relatif au HA
 	$ArrayHyperTh	= @()	# Initialisation du tableau relatif à l'HyperThreading
@@ -380,6 +533,7 @@ Function Get-ESX_Compare_Full {
 	$ArrayVLAN 		= @()	# Initialisation du tableau relatif au nombre de VLAN ESX
 	$ArrayLAN 		= @()	# Initialisation du tableau relatif au nombre d'adaptateurs LAN
 
+	LogTrace ("-- Appel de la fonction 'Get-ElapsedTime'")
 	Get-ElapsedTime
 
 	### Valorisation des tableaux relatifs aux colonnes à vérifier
@@ -389,34 +543,35 @@ Function Get-ESX_Compare_Full {
 
 	# Boucle déterminant la première ligne Excel du cluster à la dernière
 	$ExcelLine = ($ExcelLine_Start..$($ExcelLine_Start + $ESX_Counter - 1))
-	ForEach($l in $ExcelLine)	{
+	LogTrace ("-- Traitement Excel de la ligne $ExcelLine_Start à la ligne $($ExcelLine_Start + $ESX_Counter - 1)")
+	ForEach($L in $ExcelLine)	{
 		### Si le nom du cluster existe dans la feuille de référence ET que l'ESXi n'est pas arrêté
-		If ($ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Statut_ESX).Text -ne "PoweredOff") {
-			If ($ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Etat_ESX).Text -eq "Connected") {
-				If ($ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Balise).Text -Like "@*") {
-					$ArrayTag		+= $ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Balise).Text
-					$ArrayVersion	+= $ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Version).Text
-					$ArrayTimeZone 	+= $ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Zone_Temps).Text
-					$ArrayBaseline 	+= $ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Niveau_Compliance).Text
-					$ArrayNTPd	 	+= $ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Etat_Demon_NTP).Text
-					$ArraySAN 		+= $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_Chemins).Text.Substring(0, $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_Chemins).Text.IndexOf(" "))
-					$ArrayLUN		+= $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_LUNs).Text
-					$ArraySANDeath	+= $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_Chemins_MORTS).Text.Substring(0, $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_Chemins_MORTS).Text.IndexOf("(") - 1)
-					$ArraySANAlive	+= $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_Chemins_ACTIFS).Text.Substring(0, $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_Chemins_ACTIFS).Text.IndexOf("(") - 1)
-					$ArraySANRedon	+= $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Redondance_Chemins).Text
-					$ArrayCPUPolicy	+= $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Current_CPU_Policy).Text
-					$ArrayHA		+= $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Mode_HA).Text
-					$ArrayHyperTh	+= $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Hyperthreading).Text
-					$ArrayEVC		+= $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_EVC).Text
-					$ArrayAlarme	+= $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Etat_Alarmes).Text
-					$ArrayTPS 		+= $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_TPS_Salting).Text
-					$ArrayLPages 	+= $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Larges_Pages_RAM).Text
-					$ArrayVLAN 		+= $ExcelWorkSheet.Cells.Item($l, $Excel_NETWORK_VLAN).Text.Substring(1, $ExcelWorkSheet.Cells.Item($l, $Excel_NETWORK_VLAN).Text.IndexOf(")") - 1)
-					$ArrayLAN 		+= $ExcelWorkSheet.Cells.Item($l, $Excel_NETWORK_Adaptateurs).Text.Substring(1, $ExcelWorkSheet.Cells.Item($l, $Excel_NETWORK_Adaptateurs).Text.IndexOf(")") - 1)
+		If ($ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Statut_ESX).Text -ne "PoweredOff") {
+			If ($ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Etat_ESX).Text -eq "Connected") {
+				If ($ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Balise).Text -Like "@*") {
+					$ArrayTag		+= $ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Balise).Text
+					$ArrayVersion	+= $ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Version).Text
+					$ArrayTimeZone 	+= $ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Zone_Temps).Text
+					$ArrayBaseline 	+= $ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Niveau_Compliance).Text
+					$ArrayNTPd	 	+= $ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Etat_Demon_NTP).Text
+					$ArraySAN 		+= $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_Chemins).Text.Substring(0, $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_Chemins).Text.IndexOf(" "))
+					$ArrayLUN		+= $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_LUNs).Text
+					$ArraySANDeath	+= $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_Chemins_MORTS).Text.Substring(0, $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_Chemins_MORTS).Text.IndexOf("(") - 1)
+					$ArraySANAlive	+= $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_Chemins_ACTIFS).Text.Substring(0, $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_Chemins_ACTIFS).Text.IndexOf("(") - 1)
+					$ArrayCPUPolicy	+= $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Current_CPU_Policy).Text
+					$ArrayHA		+= $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Mode_HA).Text
+					$ArrayHyperTh	+= $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Hyperthreading).Text
+					$ArrayEVC		+= $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_EVC).Text
+					$ArrayAlarme	+= $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Etat_Alarmes).Text
+					$ArrayTPS 		+= $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_TPS_Salting).Text
+					$ArrayLPages 	+= $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Larges_Pages_RAM).Text
+					$ArrayVLAN 		+= $ExcelWorkSheet.Cells.Item($L, $Excel_NETWORK_VLAN).Text.Substring(1, $ExcelWorkSheet.Cells.Item($L, $Excel_NETWORK_VLAN).Text.IndexOf(")") - 1)
+					$ArrayLAN 		+= $ExcelWorkSheet.Cells.Item($L, $Excel_NETWORK_Adaptateurs).Text.Substring(1, $ExcelWorkSheet.Cells.Item($L, $Excel_NETWORK_Adaptateurs).Text.IndexOf(")") - 1)
 				}
 			}
 		}
 	}
+	LogTrace ("-- Appel de la fonction 'Get-ElapsedTime'")
 	Get-ElapsedTime
 
 	### Détermination des valeurs de références (majoritaires)
@@ -433,7 +588,6 @@ Function Get-ESX_Compare_Full {
 	$Ref_ArrayLUN 		= ($ArrayLUN 		| Group | ?{ $_.Count -gt ($ESX_Counter/2) }).Values | Select -Last 1
 	$Ref_ArraySANDeath	= ($ArraySANDeath	| Group | ?{ $_.Count -gt ($ESX_Counter/2) }).Values | Select -Last 1
 	$Ref_ArraySANAlive	= ($ArraySANAlive	| Group | ?{ $_.Count -gt ($ESX_Counter/2) }).Values | Select -Last 1
-	$Ref_ArraySANRedon	= ($ArraySANRedon	| Group | ?{ $_.Count -gt ($ESX_Counter/2) }).Values | Select -Last 1
 	$Ref_ArrayCPUPolicy	= ($ArrayCPUPolicy 	| Group | ?{ $_.Count -gt ($ESX_Counter/2) }).Values | Select -Last 1
 	$Ref_ArrayHA		= ($ArrayHA 		| Group | ?{ $_.Count -gt ($ESX_Counter/2) }).Values | Select -Last 1
 	$Ref_ArrayHyperTh	= ($ArrayHyperTh 	| Group | ?{ $_.Count -gt ($ESX_Counter/2) }).Values | Select -Last 1
@@ -444,6 +598,7 @@ Function Get-ESX_Compare_Full {
 	$Ref_ArrayVLAN 		= ($ArrayVLAN 		| Group | ?{ $_.Count -gt ($ESX_Counter/2) }).Values | Select -Last 1
 	$Ref_ArrayLAN 		= ($ArrayLAN 		| Group | ?{ $_.Count -gt ($ESX_Counter/2) }).Values | Select -Last 1
 	
+	LogTrace ("-- Appel de la fonction 'Get-ElapsedTime'")
 	Get-ElapsedTime
 	
 	### Inscription des valeurs de références par cluster dans la 2ème feuille du fichier Excel
@@ -451,34 +606,38 @@ Function Get-ESX_Compare_Full {
 	LogTrace (" * Inscription des valeurs de références dans Excel")
 	$ElapsedTime_Start = (Get-Date)
 	
-	$ExcelWorkSheet_Ref.Cells.Item($Cluster_ID + 1, $Excel_Ref_Cluster)			= $Cluster.Name
-	If ($Ref_ArrayVersion)		{ $ExcelWorkSheet_Ref.Cells.Item($Cluster_ID + 1, $Excel_Ref_ArrayVersion)		= $Ref_ArrayVersion		} Else { $ExcelWorkSheet_Ref.Cells.Item($Cluster_ID + 1, $Excel_Ref_ArrayVersion)	= "-" }
-	If ($Ref_ArrayTimeZone) 	{ $ExcelWorkSheet_Ref.Cells.Item($Cluster_ID + 1, $Excel_Ref_ArrayTimeZone) 	= $Ref_ArrayTimeZone 	} Else { $ExcelWorkSheet_Ref.Cells.Item($Cluster_ID + 1, $Excel_Ref_ArrayTimeZone)	= "-" }
-	If ($Ref_ArrayBaseline) 	{ $ExcelWorkSheet_Ref.Cells.Item($Cluster_ID + 1, $Excel_Ref_ArrayBaseline) 	= $Ref_ArrayBaseline 	} Else { $ExcelWorkSheet_Ref.Cells.Item($Cluster_ID + 1, $Excel_Ref_ArrayBaseline)	= "-" }
-	If ($Ref_ArrayNTPd) 		{ $ExcelWorkSheet_Ref.Cells.Item($Cluster_ID + 1, $Excel_Ref_ArrayNTPd) 		= $Ref_ArrayNTPd 		} Else { $ExcelWorkSheet_Ref.Cells.Item($Cluster_ID + 1, $Excel_Ref_ArrayNTPd)		= "-" }
-	If ($Ref_ArraySAN) 			{ $ExcelWorkSheet_Ref.Cells.Item($Cluster_ID + 1, $Excel_Ref_ArraySAN) 			= $Ref_ArraySAN 		} Else { $ExcelWorkSheet_Ref.Cells.Item($Cluster_ID + 1, $Excel_Ref_ArraySAN)		= "-" }
-	If ($Ref_ArrayLUN) 			{ $ExcelWorkSheet_Ref.Cells.Item($Cluster_ID + 1, $Excel_Ref_ArrayLUN) 			= $Ref_ArrayLUN 		} Else { $ExcelWorkSheet_Ref.Cells.Item($Cluster_ID + 1, $Excel_Ref_ArrayLUN)		= "-" }
-	If ($Ref_ArrayCPUPolicy)	{ $ExcelWorkSheet_Ref.Cells.Item($Cluster_ID + 1, $Excel_Ref_ArrayCPUPolicy)	= $Ref_ArrayCPUPolicy 	} Else { $ExcelWorkSheet_Ref.Cells.Item($Cluster_ID + 1, $Excel_Ref_ArrayCPUPolicy)	= "-" }
-	If ($Ref_ArrayHA) 			{ $ExcelWorkSheet_Ref.Cells.Item($Cluster_ID + 1, $Excel_Ref_ArrayHA) 			= $Ref_ArrayHA 			} Else { $ExcelWorkSheet_Ref.Cells.Item($Cluster_ID + 1, $Excel_Ref_ArrayHA)		= "-" }
-	If ($Ref_ArrayHyperTh) 		{ $ExcelWorkSheet_Ref.Cells.Item($Cluster_ID + 1, $Excel_Ref_ArrayHyperTh) 		= $Ref_ArrayHyperTh 	} Else { $ExcelWorkSheet_Ref.Cells.Item($Cluster_ID + 1, $Excel_Ref_ArrayHyperTh)	= "-" }
-	If ($Ref_ArrayEVC) 			{ $ExcelWorkSheet_Ref.Cells.Item($Cluster_ID + 1, $Excel_Ref_ArrayEVC) 			= $Ref_ArrayEVC 		} Else { $ExcelWorkSheet_Ref.Cells.Item($Cluster_ID + 1, $Excel_Ref_ArrayEVC)		= "-" }
-	If ($Ref_ArrayAlarme) 		{ $ExcelWorkSheet_Ref.Cells.Item($Cluster_ID + 1, $Excel_Ref_ArrayAlarme) 		= $Ref_ArrayAlarme 		} Else { $ExcelWorkSheet_Ref.Cells.Item($Cluster_ID + 1, $Excel_Ref_ArrayAlarme)	= "-" }
-	If ($Ref_ArrayTPS) 			{ $ExcelWorkSheet_Ref.Cells.Item($Cluster_ID + 1, $Excel_Ref_ArrayTPS) 			= $Ref_ArrayTPS 		} Else { $ExcelWorkSheet_Ref.Cells.Item($Cluster_ID + 1, $Excel_Ref_ArrayTPS)		= "-" }
-	If ($Ref_ArrayLPages) 		{ $ExcelWorkSheet_Ref.Cells.Item($Cluster_ID + 1, $Excel_Ref_ArrayLPages)		= $Ref_ArrayLPages 		} Else { $ExcelWorkSheet_Ref.Cells.Item($Cluster_ID + 1, $Excel_Ref_ArrayLPages)	= "-" }
-	If ($Ref_ArrayVLAN) 		{ $ExcelWorkSheet_Ref.Cells.Item($Cluster_ID + 1, $Excel_Ref_ArrayVLAN) 		= $Ref_ArrayVLAN 		} Else { $ExcelWorkSheet_Ref.Cells.Item($Cluster_ID + 1, $Excel_Ref_ArrayVLAN)		= "-" }
-	If ($Ref_ArrayLAN) 			{ $ExcelWorkSheet_Ref.Cells.Item($Cluster_ID + 1, $Excel_Ref_ArrayLAN)			= $Ref_ArrayLAN 		} Else { $ExcelWorkSheet_Ref.Cells.Item($Cluster_ID + 1, $Excel_Ref_ArrayLAN)		= "-" }
+	$GetName = $ExcelWorkSheet_Ref.Range("A1").EntireColumn.Find("")
+	
+	$ExcelWorkSheet_Ref.Cells.Item($GetName.Row, $Excel_Ref_Cluster) = $Cluster.Name
+	If ($Ref_ArrayVersion)		{ $ExcelWorkSheet_Ref.Cells.Item($GetName.Row, $Excel_Ref_ArrayVersion)		= $Ref_ArrayVersion		} Else { $ExcelWorkSheet_Ref.Cells.Item($GetName.Row, $Excel_Ref_ArrayVersion)		= "-" }
+	If ($Ref_ArrayTimeZone) 	{ $ExcelWorkSheet_Ref.Cells.Item($GetName.Row, $Excel_Ref_ArrayTimeZone) 	= $Ref_ArrayTimeZone 	} Else { $ExcelWorkSheet_Ref.Cells.Item($GetName.Row, $Excel_Ref_ArrayTimeZone)		= "-" }
+	If ($Ref_ArrayBaseline) 	{ $ExcelWorkSheet_Ref.Cells.Item($GetName.Row, $Excel_Ref_ArrayBaseline) 	= $Ref_ArrayBaseline 	} Else { $ExcelWorkSheet_Ref.Cells.Item($GetName.Row, $Excel_Ref_ArrayBaseline)		= "-" }
+	If ($Ref_ArrayNTPd) 		{ $ExcelWorkSheet_Ref.Cells.Item($GetName.Row, $Excel_Ref_ArrayNTPd) 		= $Ref_ArrayNTPd 		} Else { $ExcelWorkSheet_Ref.Cells.Item($GetName.Row, $Excel_Ref_ArrayNTPd)			= "-" }
+	If ($Ref_ArraySAN) 			{ $ExcelWorkSheet_Ref.Cells.Item($GetName.Row, $Excel_Ref_ArraySAN) 		= $Ref_ArraySAN 		} Else { $ExcelWorkSheet_Ref.Cells.Item($GetName.Row, $Excel_Ref_ArraySAN)			= "-" }
+	If ($Ref_ArrayLUN) 			{ $ExcelWorkSheet_Ref.Cells.Item($GetName.Row, $Excel_Ref_ArrayLUN) 		= $Ref_ArrayLUN 		} Else { $ExcelWorkSheet_Ref.Cells.Item($GetName.Row, $Excel_Ref_ArrayLUN)			= "-" }
+	If ($Ref_ArrayCPUPolicy)	{ $ExcelWorkSheet_Ref.Cells.Item($GetName.Row, $Excel_Ref_ArrayCPUPolicy)	= $Ref_ArrayCPUPolicy 	} Else { $ExcelWorkSheet_Ref.Cells.Item($GetName.Row, $Excel_Ref_ArrayCPUPolicy)	= "-" }
+	If ($Ref_ArrayHA) 			{ $ExcelWorkSheet_Ref.Cells.Item($GetName.Row, $Excel_Ref_ArrayHA) 			= $Ref_ArrayHA 			} Else { $ExcelWorkSheet_Ref.Cells.Item($GetName.Row, $Excel_Ref_ArrayHA)			= "-" }
+	If ($Ref_ArrayHyperTh) 		{ $ExcelWorkSheet_Ref.Cells.Item($GetName.Row, $Excel_Ref_ArrayHyperTh) 	= $Ref_ArrayHyperTh 	} Else { $ExcelWorkSheet_Ref.Cells.Item($GetName.Row, $Excel_Ref_ArrayHyperTh)		= "-" }
+	If ($Ref_ArrayEVC) 			{ $ExcelWorkSheet_Ref.Cells.Item($GetName.Row, $Excel_Ref_ArrayEVC) 		= $Ref_ArrayEVC 		} Else { $ExcelWorkSheet_Ref.Cells.Item($GetName.Row, $Excel_Ref_ArrayEVC)			= "-" }
+	If ($Ref_ArrayAlarme) 		{ $ExcelWorkSheet_Ref.Cells.Item($GetName.Row, $Excel_Ref_ArrayAlarme) 		= $Ref_ArrayAlarme 		} Else { $ExcelWorkSheet_Ref.Cells.Item($GetName.Row, $Excel_Ref_ArrayAlarme)		= "-" }
+	If ($Ref_ArrayTPS) 			{ $ExcelWorkSheet_Ref.Cells.Item($GetName.Row, $Excel_Ref_ArrayTPS) 		= $Ref_ArrayTPS 		} Else { $ExcelWorkSheet_Ref.Cells.Item($GetName.Row, $Excel_Ref_ArrayTPS)			= "-" }
+	If ($Ref_ArrayLPages) 		{ $ExcelWorkSheet_Ref.Cells.Item($GetName.Row, $Excel_Ref_ArrayLPages)		= $Ref_ArrayLPages 		} Else { $ExcelWorkSheet_Ref.Cells.Item($GetName.Row, $Excel_Ref_ArrayLPages)		= "-" }
+	If ($Ref_ArrayVLAN) 		{ $ExcelWorkSheet_Ref.Cells.Item($GetName.Row, $Excel_Ref_ArrayVLAN) 		= $Ref_ArrayVLAN 		} Else { $ExcelWorkSheet_Ref.Cells.Item($GetName.Row, $Excel_Ref_ArrayVLAN)			= "-" }
+	If ($Ref_ArrayLAN) 			{ $ExcelWorkSheet_Ref.Cells.Item($GetName.Row, $Excel_Ref_ArrayLAN)			= $Ref_ArrayLAN 		} Else { $ExcelWorkSheet_Ref.Cells.Item($GetName.Row, $Excel_Ref_ArrayLAN)			= "-" }
 	
 	Switch -Wildcard ($vCenter)	{
-		"*VCSZ*" { $ExcelWorkSheet_Ref.Cells.Item($Cluster_ID + 1, $Excel_Ref_ENVironnement) 	= "PRODUCTION" }
-		"*VCSY*" { $ExcelWorkSheet_Ref.Cells.Item($Cluster_ID + 1, $Excel_Ref_ENVironnement) 	= "NON PRODUCTION" }
-		"*VCSQ*" { $ExcelWorkSheet_Ref.Cells.Item($Cluster_ID + 1, $Excel_Ref_ENVironnement) 	= "CLOUD" }
-		"*VCSZY*" { $ExcelWorkSheet_Ref.Cells.Item($Cluster_ID + 1, $Excel_Ref_ENVironnement) 	= "SITES ADMINISTRATIFS" }
-		"*VCSSA*" { $ExcelWorkSheet_Ref.Cells.Item($Cluster_ID + 1, $Excel_Ref_ENVironnement) 	= "BAC A SABLE" }
-		Default	{ $ExcelWorkSheet_Ref.Cells.Item($Cluster_ID + 1, $Excel_Ref_ENVironnement) 	= "NA" }
+		"*VCSZ*" { $ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_ENVironnement)	= "PRODUCTION" }
+		"*VCSY*" { $ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_ENVironnement)	= "NON PRODUCTION" }
+		"*VCSQ*" { $ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_ENVironnement)	= "CLOUD" }
+		"*VCSZY*" { $ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_ENVironnement) 	= "SITES ADMINISTRATIFS" }
+		"*VCSSA*" { $ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_ENVironnement)	= "BAC A SABLE" }
+		"*VCS00*" { $ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_ENVironnement)	= "PVM" }
+		Default	{ $ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_ENVironnement)		= "NA" }
 	}
 	
-	$ExcelWorkSheet.Cells.Item($Cluster_ID + 1, $Excel_Ref_TimeStamp) = Get-Date -UFormat "%Y/%m/%d %H:%M:%S"
+	$ExcelWorkSheet_Ref.Cells.Item($GetName.Row, $Excel_Ref_TimeStamp) = Get-Date -UFormat "%Y/%m/%d %H:%M:%S"
 	
+	LogTrace ("-- Appel de la fonction 'Get-ElapsedTime'")
 	Get-ElapsedTime
 
 	### Vérification des valeurs par rapport aux valeurs majoritaires
@@ -491,60 +650,69 @@ Function Get-ESX_Compare_Full {
 	$ESX_NotCompliant_Item = 0
 	
 	$ExcelLine = ($ExcelLine_Start..$($ExcelLine_Start + $ESX_Counter - 1))
-	ForEach($l in $ExcelLine)	{
+	LogTrace ("-- Traitement Excel de la ligne $ExcelLine_Start à la ligne $($ExcelLine_Start + $ESX_Counter - 1)")
+	ForEach($L in $ExcelLine)	{
 		$ESX_Percent_NotCompliant = 0
 			
 		### Si le nom du cluster existe dans la feuille de référence ET que l'ESXi n'est pas arrêté
-		If ($ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Statut_ESX).Text -ne "PoweredOff") {
-			If ($ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Etat_ESX).Text -eq "Connected") {
-				If ($ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Balise).Text -Like "@*") {
-					If ($ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Serveurs_NTP).Font.ColorIndex -eq $Excel_Couleur_Error)	{ $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details).Text + "[Erreur NTP Serveur]" + $vbcrlf; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }
-					If ($ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Balise).Text -ne $Ref_ArrayTag) 							{ $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details).Text + "[≠ Tag/Ensemble]" + $vbcrlf; 				$ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Balise).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Balise).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }								Else { $ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Balise).Font.ColorIndex = 1; 				$ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Balise).Font.Bold = $False }
-					If ($ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Version).Text -ne $Ref_ArrayVersion) 					{ $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details).Text + "[≠ Version/Ensemble]" + $vbcrlf; 			$ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Version).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Version).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }							Else { $ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Version).Font.ColorIndex = 1; 			$ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Version).Font.Bold = $False }
-					If ($ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Zone_Temps).Text -ne $Ref_ArrayTimeZone) 				{ $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details).Text + "[≠ TimeZone/Ensemble]" + $vbcrlf; 		$ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Zone_Temps).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Zone_Temps).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }						Else { $ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Zone_Temps).Font.ColorIndex = 1; 			$ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Zone_Temps).Font.Bold = $False }
-					If ($ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Niveau_Compliance).Text -ne $Ref_ArrayBaseline) 			{ $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details).Text + "[≠ Baseline/Ensemble]" + $vbcrlf; 		$ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Niveau_Compliance).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Niveau_Compliance).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }		Else { $ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Niveau_Compliance).Font.ColorIndex = 1; 	$ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Niveau_Compliance).Font.Bold = $False }
-					If ($ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Etat_Demon_NTP).Text -ne $Ref_ArrayNTPd) 				{ $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details).Text + "[≠ NTP démon/Ensemble]" + $vbcrlf; 		$ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Etat_Demon_NTP).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Etat_Demon_NTP).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }				Else { $ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Etat_Demon_NTP).Font.ColorIndex = 1; 		$ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Etat_Demon_NTP).Font.Bold = $False }
-					If ($ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_Chemins).Text.Substring(0, $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_Chemins).Text.IndexOf(" ")) -ne $Ref_ArraySAN) { $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details)	= 					$ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details).Text + "[≠ Chemins SAN/Ensemble]" + $vbcrlf; $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_Chemins).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_Chemins).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 } Else { $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_Chemins).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_Chemins).Font.Bold = $False }
-					If ($ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_LUNs).Text -ne $Ref_ArrayLUN)						{ $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details).Text + "[≠ LUNs/Ensemble]"; 			$ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_LUNs).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_LUNs).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 } 						Else { $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_LUNs).Font.ColorIndex = 1; 			$ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_LUNs).Font.Bold = $False }
-					If ($ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_Chemins_MORTS).Text.Substring(0, $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_Chemins_MORTS).Text.IndexOf("(") - 1) -ne $Ref_ArraySANDeath) { $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details) =$ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details).Text + "[Chemin(s) mort(s)]" + $vbcrlf; $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_Chemins_MORTS).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_Chemins_MORTS).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 } Else { $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_Chemins_MORTS).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_Chemins_MORTS).Font.Bold = $False }
-					If ($ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_Chemins_ACTIFS).Text.Substring(0, $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_Chemins_ACTIFS).Text.IndexOf("(") - 1) -ne $Ref_ArraySANAlive) { $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details) =$ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details).Text + "[Chemin(s) présent(s)]" + $vbcrlf; $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_Chemins_ACTIFS).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_Chemins_ACTIFS).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 } Else { $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_Chemins_ACTIFS).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_Chemins_ACTIFS).Font.Bold = $False }
-					If ($ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Redondance_Chemins).Text -ne $Ref_ArraySANRedon) 			{ $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details).Text + "[Erreur redondance SAN]" + $vbcrlf; 		$ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Redondance_Chemins).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Redondance_Chemins).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }		Else { $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Redondance_Chemins).Font.ColorIndex = 1; 	$ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Redondance_Chemins).Font.Bold = $False }
-					If ($ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Current_CPU_Policy).Text -ne $Ref_ArrayCPUPolicy)		{ $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details).Text + "[≠CPU Policy/Ensemble]" + $vbcrlf; 		$ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Current_CPU_Policy).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Current_CPU_Policy).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }		Else { $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Current_CPU_Policy).Font.ColorIndex = 1; 	$ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Current_CPU_Policy).Font.Bold = $False }
-					If ($ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Mode_HA).Text -ne $Ref_ArrayHA) 							{ $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details).Text + "[≠ HA/Ensemble]" + $vbcrlf; 				$ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Mode_HA).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Mode_HA).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }							Else { $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Mode_HA).Font.ColorIndex = 1; 			$ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Mode_HA).Font.Bold = $False }
-					If ($ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Hyperthreading).Text -ne $Ref_ArrayHyperTh) 				{ $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details).Text + "[≠ HyperThreading/Ensemble]" + $vbcrlf; 	$ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Hyperthreading).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Hyperthreading).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }				Else { $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Hyperthreading).Font.ColorIndex = 1; 		$ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Hyperthreading).Font.Bold = $False }
-					If ($ExcelWorkSheet.Cells.Item($l, $Excel_HOST_EVC).Text -ne $Ref_ArrayEVC) 							{ $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details).Text + "[≠ EVC/Ensemble]" + $vbcrlf; 				$ExcelWorkSheet.Cells.Item($l, $Excel_HOST_EVC).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_EVC).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 } 									Else { $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_EVC).Font.ColorIndex = 1; 				$ExcelWorkSheet.Cells.Item($l, $Excel_HOST_EVC).Font.Bold = $False }
-					If ($ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Etat_Alarmes).Text -ne $Ref_ArrayAlarme)					{ $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details).Text + "[≠ Alarmes/Ensemble]" + $vbcrlf; 			$ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Etat_Alarmes).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Etat_Alarmes).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }					Else { $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Etat_Alarmes).Font.ColorIndex = 1; 		$ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Etat_Alarmes).Font.Bold = $False }
-					If ($ExcelWorkSheet.Cells.Item($l, $Excel_HOST_TPS_Salting).Text -ne $Ref_ArrayTPS) 					{ $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details).Text + "[≠ TPS/Ensemble]" + $vbcrlf; 				$ExcelWorkSheet.Cells.Item($l, $Excel_HOST_TPS_Salting).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_TPS_Salting).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }					Else { $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_TPS_Salting).Font.ColorIndex = 1; 		$ExcelWorkSheet.Cells.Item($l, $Excel_HOST_TPS_Salting).Font.Bold = $False }
-					If ($ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Larges_Pages_RAM).Text -ne $Ref_ArrayLPages) 			{ $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details).Text + "[≠ Large Pages/Ensemble]" + $vbcrlf; 		$ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Larges_Pages_RAM).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Larges_Pages_RAM).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }			Else { $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Larges_Pages_RAM).Font.ColorIndex = 1; 	$ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Larges_Pages_RAM).Font.Bold = $False }
-					If ($ExcelWorkSheet.Cells.Item($l, $Excel_NETWORK_VLAN).Text.Substring(1, $ExcelWorkSheet.Cells.Item($l, $Excel_NETWORK_VLAN).Text.IndexOf(")") - 1) -ne $Ref_ArrayVLAN) { $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details)	= 						$ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details).Text + "[≠ VLANs/Ensemble]" + $vbcrlf; $ExcelWorkSheet.Cells.Item($l, $Excel_NETWORK_VLAN).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($l, $Excel_NETWORK_VLAN).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 } Else { $ExcelWorkSheet.Cells.Item($l, $Excel_NETWORK_VLAN).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($l, $Excel_NETWORK_VLAN).Font.Bold = $False }
-					If ($ExcelWorkSheet.Cells.Item($l, $Excel_NETWORK_Adaptateurs).Text.Substring(1, $ExcelWorkSheet.Cells.Item($l, $Excel_NETWORK_Adaptateurs).Text.IndexOf(")") - 1) -ne $Ref_ArrayLAN) { $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details)	= 			$ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details).Text + "[≠ Adaptateurs LAN/Ensemble]" + $vbcrlf; $ExcelWorkSheet.Cells.Item($l, $Excel_NETWORK_Adaptateurs).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($l, $Excel_NETWORK_Adaptateurs).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 } Else { $ExcelWorkSheet.Cells.Item($l, $Excel_NETWORK_Adaptateurs).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($l, $Excel_NETWORK_Adaptateurs).Font.Bold = $False }
+		If ($ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Statut_ESX).Text -ne "PoweredOff") {
+			If ($ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Etat_ESX).Text -eq "Connected") {
+				If ($ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Balise).Text -Like "@*") {
+					If ($ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Serveurs_NTP).Font.ColorIndex -eq $Excel_Couleur_Error)	{ $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Text + "[Erreur NTP Serveur]" + $VBCrLF; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }
+					If ($ExcelWorkSheet.Cells.Item($L, $Excel_NETWORK_vMotion).Font.ColorIndex -eq $Excel_Couleur_Error)	{ $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Text + "[Erreur @IP vMotion]" + $VBCrLF; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }
+					If ($ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Balise).Text -ne $Ref_ArrayTag) 							{ $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Text + "[! Balise/Ensemble]" + $VBCrLF; $ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Balise).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Balise).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }									Else { $ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Balise).Font.ColorIndex = 1; 				$ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Balise).Font.Bold = $False }
+					If ($ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Version).Text -ne $Ref_ArrayVersion) 					{ $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Text + "[! Version/Ensemble]" + $VBCrLF; $ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Version).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Version).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }							Else { $ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Version).Font.ColorIndex = 1; 			$ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Version).Font.Bold = $False }
+					If ($ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Zone_Temps).Text -ne $Ref_ArrayTimeZone) 				{ $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Text + "[! TimeZone/Ensemble]" + $VBCrLF; $ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Zone_Temps).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Zone_Temps).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }					Else { $ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Zone_Temps).Font.ColorIndex = 1; 			$ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Zone_Temps).Font.Bold = $False }
+					If ($ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Niveau_Compliance).Text -ne $Ref_ArrayBaseline) 			{ $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Text + "[! Baseline/Ensemble]" + $VBCrLF; $ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Niveau_Compliance).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Niveau_Compliance).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }		Else { $ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Niveau_Compliance).Font.ColorIndex = 1; 	$ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Niveau_Compliance).Font.Bold = $False }
+					If ($ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Etat_Demon_NTP).Text -ne $Ref_ArrayNTPd) 				{ $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Text + "[! NTP démon/Ensemble]" + $VBCrLF; $ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Etat_Demon_NTP).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Etat_Demon_NTP).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }			Else { $ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Etat_Demon_NTP).Font.ColorIndex = 1; 		$ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Etat_Demon_NTP).Font.Bold = $False }
+					If ($ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_Chemins).Text.Substring(0, $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_Chemins).Text.IndexOf(" ")) -ne $Ref_ArraySAN) { $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details) = $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Text + "[! Chemins SAN/Ensemble]" + $VBCrLF; $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_Chemins).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_Chemins).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 } Else { $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_Chemins).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_Chemins).Font.Bold = $False }
+					If ($ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_LUNs).Text -ne $Ref_ArrayLUN)						{ $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Text + "[! LUNs/Ensemble]"; $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_LUNs).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_LUNs).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 } 									Else { $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_LUNs).Font.ColorIndex = 1; 			$ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_LUNs).Font.Bold = $False }
+					If ($ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_Chemins_MORTS).Text.Substring(0, $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_Chemins_MORTS).Text.IndexOf("(") - 1) -ne $Ref_ArraySANDeath) { $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details) =$ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Text + "[Chemin(s) mort(s)]" + $VBCrLF; $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_Chemins_MORTS).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_Chemins_MORTS).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 } Else { $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_Chemins_MORTS).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_Chemins_MORTS).Font.Bold = $False }
+					If ($ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_Chemins_ACTIFS).Text.Substring(0, $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_Chemins_ACTIFS).Text.IndexOf("(") - 1) -ne $Ref_ArraySANAlive) { $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details) =$ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Text + "[! Chemin(s) présent(s)]" + $VBCrLF; $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_Chemins_ACTIFS).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_Chemins_ACTIFS).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 } Else { $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_Chemins_ACTIFS).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_Chemins_ACTIFS).Font.Bold = $False }
+					If ($ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Redondance_Chemins).Text -ne "OK")			 			{ $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Text + "[Erreur redondance SAN]" + $VBCrLF; $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Redondance_Chemins).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Redondance_Chemins).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }	Else { $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Redondance_Chemins).Font.ColorIndex = 1; 	$ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Redondance_Chemins).Font.Bold = $False }
+					If ($ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Current_CPU_Policy).Text -ne $Ref_ArrayCPUPolicy)		{ $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Text + "[!CPU Policy/Ensemble]" + $VBCrLF; $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Current_CPU_Policy).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Current_CPU_Policy).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }	Else { $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Current_CPU_Policy).Font.ColorIndex = 1; 	$ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Current_CPU_Policy).Font.Bold = $False }
+					If ($ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Mode_HA).Text -ne $Ref_ArrayHA) 							{ $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Text + "[! HA/Ensemble]" + $VBCrLF; $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Mode_HA).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Mode_HA).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }								Else { $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Mode_HA).Font.ColorIndex = 1; 			$ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Mode_HA).Font.Bold = $False }
+					If ($ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Hyperthreading).Text -ne $Ref_ArrayHyperTh) 				{ $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Text + "[! HyperThreading/Ensemble]" + $VBCrLF; $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Hyperthreading).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Hyperthreading).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }		Else { $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Hyperthreading).Font.ColorIndex = 1; 		$ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Hyperthreading).Font.Bold = $False }
+					If ($ExcelWorkSheet.Cells.Item($L, $Excel_HOST_EVC).Text -ne $Ref_ArrayEVC) 							{ $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Text + "[! EVC/Ensemble]" + $VBCrLF; $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_EVC).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_EVC).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 } 										Else { $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_EVC).Font.ColorIndex = 1; 				$ExcelWorkSheet.Cells.Item($L, $Excel_HOST_EVC).Font.Bold = $False }
+					If ($ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Etat_Alarmes).Text -ne $Ref_ArrayAlarme)					{ $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Text + "[! Alarmes/Ensemble]" + $VBCrLF; $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Etat_Alarmes).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Etat_Alarmes).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }					Else { $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Etat_Alarmes).Font.ColorIndex = 1; 		$ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Etat_Alarmes).Font.Bold = $False }
+					If ($ExcelWorkSheet.Cells.Item($L, $Excel_HOST_TPS_Salting).Text -ne $Ref_ArrayTPS) 					{ $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Text + "[! TPS/Ensemble]" + $VBCrLF; $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_TPS_Salting).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_TPS_Salting).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }						Else { $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_TPS_Salting).Font.ColorIndex = 1; 		$ExcelWorkSheet.Cells.Item($L, $Excel_HOST_TPS_Salting).Font.Bold = $False }
+					If ($ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Larges_Pages_RAM).Text -ne $Ref_ArrayLPages) 			{ $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Text + "[! Large Pages/Ensemble]" + $VBCrLF; $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Larges_Pages_RAM).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Larges_Pages_RAM).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }		Else { $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Larges_Pages_RAM).Font.ColorIndex = 1; 	$ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Larges_Pages_RAM).Font.Bold = $False }
+					If ($ExcelWorkSheet.Cells.Item($L, $Excel_NETWORK_VLAN).Text.Substring(1, $ExcelWorkSheet.Cells.Item($L, $Excel_NETWORK_VLAN).Text.IndexOf(")") - 1) -ne $Ref_ArrayVLAN) { $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Text + "[! VLANs/Ensemble]" + $VBCrLF; $ExcelWorkSheet.Cells.Item($L, $Excel_NETWORK_VLAN).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($L, $Excel_NETWORK_VLAN).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 } Else { $ExcelWorkSheet.Cells.Item($L, $Excel_NETWORK_VLAN).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($L, $Excel_NETWORK_VLAN).Font.Bold = $False }
+					If ($ExcelWorkSheet.Cells.Item($L, $Excel_NETWORK_Adaptateurs).Text.Substring(1, $ExcelWorkSheet.Cells.Item($L, $Excel_NETWORK_Adaptateurs).Text.IndexOf(")") - 1) -ne $Ref_ArrayLAN) { $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details) = $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Text + "[! Adaptateurs LAN/Ensemble]" + $VBCrLF; $ExcelWorkSheet.Cells.Item($L, $Excel_NETWORK_Adaptateurs).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($L, $Excel_NETWORK_Adaptateurs).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 } Else { $ExcelWorkSheet.Cells.Item($L, $Excel_NETWORK_Adaptateurs).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($L, $Excel_NETWORK_Adaptateurs).Font.Bold = $False }
 				
 					### Inscription du pourcentage de conformité
-					$ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Globale)= "[" + [math]::round((100 - (($ESX_Percent_NotCompliant / 20) * 100)), 0) + "% conforme]"
-					$ESX_Percent_NotCompliant_AVE = [math]::round(($ESX_Percent_NotCompliant_AVE + (100 - (($ESX_Percent_NotCompliant / 20) * 100))) / 2, 2)
+					$ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Globale) = "[" + [math]::round((100 - (($ESX_Percent_NotCompliant / $ESX_Item_CheckType) * 100)), 0) + "% conforme]"
+					$ESX_Percent_NotCompliant_AVE = [math]::round(($ESX_Percent_NotCompliant_AVE + (100 - (($ESX_Percent_NotCompliant / $ESX_Item_CheckType) * 100))) / 2, 2)
 				} Else {
-					$ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Globale) = "-"
-					$ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details) = "ESXi en standby..."	}
+					$ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Globale) = "-"
+					$ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details) = "ESXi en standby..."	}
 			} Else {
-				$ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Globale) = "-"
-				$ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details) = "ESXi en maintenance..."	}
+				$ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Globale) = "-"
+				$ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details) = "ESXi en maintenance..."	}
 		} Else {
-			$ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Globale) = "-"
-			$ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details) = "ESXi OFF..."	}
+			$ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Globale) = "-"
+			$ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details) = "ESXi OFF..."	}
 		
 		### Mise à jour de la colonne TimeStamp
-		$ExcelWorkSheet.Cells.Item($l, $Excel_TimeStamp) = Get-Date -UFormat "%Y/%m/%d %H:%M:%S"
+		$ExcelWorkSheet.Cells.Item($L, $Excel_TimeStamp) = Get-Date -UFormat "%Y/%m/%d %H:%M:%S"
+		
+		### Valorisation des compteurs totaux
+		If ($Excel_Conformite_Globale -eq "100%") {
+			$ESX_Compliant += 1 }
+		Else {
+			$ESX_NotCompliant += 1
+		}
+		$ESX_NotCompliant_Total = $ESX_NotCompliant_Item
 	}
 	
+	LogTrace ("-- Appel de la fonction 'Get-ElapsedTime'")
 	Get-ElapsedTime
 	
 	Write-Host "Vérification de l'homogénéité des données du cluster... " -NoNewLine
-	Write-Host "(Terminée)`r`n" -ForegroundColor Black -BackgroundColor White
+	Write-Host "Terminée`r`n" -ForegroundColor Black -BackgroundColor White
 	Write-Host "--- En résumé: ---`r`n * vCenter: $vCenter`r`n * Cluster: $Cluster`r`n * Différence(s): $ESX_NotCompliant_Item`r`n * Taux moyen de conformité: $ESX_Percent_NotCompliant_AVE%`r`n------------------`r`n" -ForegroundColor White
 	LogTrace ("Vérification de l'homogénéité des données du cluster... (Terminée)")
 	LogTrace ("--- En résumé: ---`r`n * vCenter: $vCenter`r`n * Cluster: $Cluster`r`n * Différence(s): $ESX_NotCompliant_Item`r`n * Taux moyen de conformité: $ESX_Percent_NotCompliant_AVE%`r`n------------------`r`n")
-	
-	$ExcelWorkBook_Ref.Save()
 }
 
 
@@ -560,6 +728,25 @@ Function Get-ESX_Compare_Cibles {
 	Write-Host " * Initialisation de la matrice `t`t`t" -NoNewLine -ForegroundColor DarkYellow
 	LogTrace (" * Initialisation de la matrice")
 	$ElapsedTime_Start = (Get-Date)
+	
+	$Ref_ArrayTag 		= $Null
+	$Ref_ArrayVersion	= $Null
+	$Ref_ArrayTimeZone 	= $Null
+	$Ref_ArrayBaseline 	= $Null
+	$Ref_ArrayNTPd	 	= $Null
+	$Ref_ArraySAN 		= $Null
+	$Ref_ArrayLUN 		= $Null
+	$Ref_ArraySANDeath	= $Null
+	$Ref_ArraySANAlive	= $Null
+	$Ref_ArrayCPUPolicy	= $Null
+	$Ref_ArrayHA		= $Null
+	$Ref_ArrayHyperTh	= $Null
+	$Ref_ArrayEVC		= $Null
+	$Ref_ArrayAlarme	= $Null
+	$Ref_ArrayTPS 		= $Null
+	$Ref_ArrayLPages	= $Null
+	$Ref_ArrayVLAN 		= $Null
+	$Ref_ArrayLAN 		= $Null
 
 	$ArrayTag 		= @()	# Initialisation du tableau relatif au TAG
 	$ArrayVersion 	= @()	# Initialisation du tableau relatif à la version ESXi
@@ -570,7 +757,6 @@ Function Get-ESX_Compare_Cibles {
 	$ArrayLUN 		= @()	# Initialisation du tableau relatif au nombre de LUNs
 	$ArraySANDeath	= @()	# Initialisation du tableau relatif au nombre de chemins SAN morts
 	$ArraySANAlive	= @()	# Initialisation du tableau relatif au nombre de chemins SAN alive
-	$ArraySANRedon	= @()	# Initialisation du tableau relatif à la redondance SAN
 	$ArrayCPUPolicy	= @()	# Initialisation du tableau relatif à l'utilisation CPU
 	$ArrayHA		= @()	# Initialisation du tableau relatif au HA
 	$ArrayHyperTh	= @()	# Initialisation du tableau relatif à l'HyperThreading
@@ -581,6 +767,7 @@ Function Get-ESX_Compare_Cibles {
 	$ArrayVLAN 		= @()	# Initialisation du tableau relatif au nombre de VLAN ESX
 	$ArrayLAN 		= @()	# Initialisation du tableau relatif au nombre d'adaptateurs LAN
 
+	LogTrace ("-- Appel de la fonction 'Get-ElapsedTime'")
 	Get-ElapsedTime
 
 	### Valorisation des tableaux relatifs aux colonnes à vérifier
@@ -590,31 +777,32 @@ Function Get-ESX_Compare_Cibles {
 
 	# Boucle déterminant la première ligne Excel du cluster à la dernière
 	$ExcelLine = ($ExcelLine_Start..$($ExcelLine_Start + $ESX_Counter - 1))
-	ForEach($l in $ExcelLine)	{
+	LogTrace ("-- Traitement Excel de la ligne $ExcelLine_Start à la ligne $($ExcelLine_Start + $ESX_Counter - 1)")
+	ForEach($L in $ExcelLine)	{
 		### Si le nom du cluster existe dans la feuille de référence ET que l'ESXi n'est pas arrêté
-		If ($ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Statut_ESX).Text -ne "PoweredOff") {
-			$ArrayTag		+= $ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Balise).Text
-			$ArrayVersion	+= $ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Version).Text
-			$ArrayTimeZone 	+= $ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Zone_Temps).Text
-			$ArrayBaseline 	+= $ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Niveau_Compliance).Text
-			$ArrayNTPd	 	+= $ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Etat_Demon_NTP).Text
-			$ArraySAN 		+= $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_Chemins).Text.Substring(0, $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_Chemins).Text.IndexOf(" "))
-			$ArrayLUN 		+= $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_LUNs).Text
-			$ArraySANDeath	+= $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_Chemins_MORTS).Text.Substring(0, $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_Chemins_MORTS).Text.IndexOf("(") - 1)
-			$ArraySANAlive	+= $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_Chemins_ACTIFS).Text.Substring(0, $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_Chemins_ACTIFS).Text.IndexOf("(") - 1)
-			$ArraySANRedon	+= $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Redondance_Chemins).Text
-			$ArrayCPUPolicy	+= $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Current_CPU_Policy).Text
-			$ArrayHA		+= $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Mode_HA).Text
-			$ArrayHyperTh	+= $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Hyperthreading).Text
-			$ArrayEVC		+= $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_EVC).Text
-			$ArrayAlarme	+= $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Etat_Alarmes).Text
-			$ArrayTPS 		+= $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_TPS_Salting).Text
-			$ArrayLPages 	+= $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Larges_Pages_RAM).Text
-			$ArrayVLAN 		+= $ExcelWorkSheet.Cells.Item($l, $Excel_NETWORK_VLAN).Text.Substring(1, $ExcelWorkSheet.Cells.Item($l, $Excel_NETWORK_VLAN).Text.IndexOf(")") - 1)
-			$ArrayLAN 		+= $ExcelWorkSheet.Cells.Item($l, $Excel_NETWORK_Adaptateurs).Text.Substring(1, $ExcelWorkSheet.Cells.Item($l, $Excel_NETWORK_Adaptateurs).Text.IndexOf(")") - 1)
+		If ($ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Statut_ESX).Text -ne "PoweredOff") {
+			$ArrayTag		+= $ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Balise).Text
+			$ArrayVersion	+= $ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Version).Text
+			$ArrayTimeZone 	+= $ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Zone_Temps).Text
+			$ArrayBaseline 	+= $ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Niveau_Compliance).Text
+			$ArrayNTPd	 	+= $ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Etat_Demon_NTP).Text
+			$ArraySAN 		+= $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_Chemins).Text.Substring(0, $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_Chemins).Text.IndexOf(" "))
+			$ArrayLUN 		+= $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_LUNs).Text
+			$ArraySANDeath	+= $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_Chemins_MORTS).Text.Substring(0, $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_Chemins_MORTS).Text.IndexOf("(") - 1)
+			$ArraySANAlive	+= $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_Chemins_ACTIFS).Text.Substring(0, $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_Chemins_ACTIFS).Text.IndexOf("(") - 1)
+			$ArrayCPUPolicy	+= $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Current_CPU_Policy).Text
+			$ArrayHA		+= $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Mode_HA).Text
+			$ArrayHyperTh	+= $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Hyperthreading).Text
+			$ArrayEVC		+= $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_EVC).Text
+			$ArrayAlarme	+= $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Etat_Alarmes).Text
+			$ArrayTPS 		+= $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_TPS_Salting).Text
+			$ArrayLPages 	+= $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Larges_Pages_RAM).Text
+			$ArrayVLAN 		+= $ExcelWorkSheet.Cells.Item($L, $Excel_NETWORK_VLAN).Text.Substring(1, $ExcelWorkSheet.Cells.Item($L, $Excel_NETWORK_VLAN).Text.IndexOf(")") - 1)
+			$ArrayLAN 		+= $ExcelWorkSheet.Cells.Item($L, $Excel_NETWORK_Adaptateurs).Text.Substring(1, $ExcelWorkSheet.Cells.Item($L, $Excel_NETWORK_Adaptateurs).Text.IndexOf(")") - 1)
 		}
 	}
 
+	LogTrace ("-- Appel de la fonction 'Get-ElapsedTime'")
 	Get-ElapsedTime
 
 	### Détermination des valeurs de références (majoritaires)
@@ -631,7 +819,6 @@ Function Get-ESX_Compare_Cibles {
 	$Ref_ArrayLUN 		= ($ArrayLUN 		| Group | ?{ $_.Count -gt ($ESX_Counter/2) }).Values | Select -Last 1
 	$Ref_ArraySANDeath	= ($ArraySANDeath	| Group | ?{ $_.Count -gt ($ESX_Counter/2) }).Values | Select -Last 1
 	$Ref_ArraySANAlive	= ($ArraySANAlive	| Group | ?{ $_.Count -gt ($ESX_Counter/2) }).Values | Select -Last 1
-	$Ref_ArraySANRedon	= ($ArraySANRedon	| Group | ?{ $_.Count -gt ($ESX_Counter/2) }).Values | Select -Last 1
 	$Ref_ArrayCPUPolicy	= ($ArrayCPUPolicy 	| Group | ?{ $_.Count -gt ($ESX_Counter/2) }).Values | Select -Last 1
 	$Ref_ArrayHA		= ($ArrayHA 		| Group | ?{ $_.Count -gt ($ESX_Counter/2) }).Values | Select -Last 1
 	$Ref_ArrayHyperTh	= ($ArrayHyperTh 	| Group | ?{ $_.Count -gt ($ESX_Counter/2) }).Values | Select -Last 1
@@ -642,6 +829,7 @@ Function Get-ESX_Compare_Cibles {
 	$Ref_ArrayVLAN 		= ($ArrayVLAN 		| Group | ?{ $_.Count -gt ($ESX_Counter/2) }).Values | Select -Last 1
 	$Ref_ArrayLAN 		= ($ArrayLAN 		| Group | ?{ $_.Count -gt ($ESX_Counter/2) }).Values | Select -Last 1
 	
+	LogTrace ("-- Appel de la fonction 'Get-ElapsedTime'")
 	Get-ElapsedTime
 	
 	### Vérification des valeurs par rapport aux valeurs majoritaires
@@ -654,49 +842,60 @@ Function Get-ESX_Compare_Cibles {
 	$ESX_NotCompliant_Item = 0
 	
 	$ExcelLine = ($ExcelLine_Start..$($ExcelLine_Start + $ESX_Counter - 1))
-	ForEach($l in $ExcelLine)	{
+	LogTrace ("-- Traitement Excel de la ligne $ExcelLine_Start à la ligne $($ExcelLine_Start + $ESX_Counter - 1)")
+	ForEach($L in $ExcelLine)	{
 		$ESX_Percent_NotCompliant = 0
 		
 		### Si le nom du cluster existe dans la feuille de référence ET que l'ESXi n'est pas arrêté
-		If ($ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Statut_ESX).Text -ne "PoweredOff") {
-			If ($ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Serveurs_NTP).Font.ColorIndex -eq $Excel_Couleur_Error)	{ $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details).Text + "[Erreur NTP Serveur]" + $vbcrlf; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }
-			If ($ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Balise).Text -ne $Ref_ArrayTag) 							{ $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details).Text + "[≠ Tag/Ensemble]" + $vbcrlf; 				$ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Balise).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Balise).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 } 							Else { $ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Balise).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Balise).Font.Bold = $False }
-			If ($ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Version).Text -ne $Ref_ArrayVersion) 					{ $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details).Text + "[≠ Version/Ensemble]" + $vbcrlf; 			$ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Version).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Version).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }						Else { $ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Version).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Version).Font.Bold = $False }
-			If ($ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Zone_Temps).Text -ne $Ref_ArrayTimeZone) 				{ $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details).Text + "[≠ TimeZone/Ensemble]" + $vbcrlf; 		$ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Zone_Temps).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Zone_Temps).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }					Else { $ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Zone_Temps).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Zone_Temps).Font.Bold = $False }
-			If ($ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Niveau_Compliance).Text -ne $Ref_ArrayBaseline) 			{ $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details).Text + "[≠ Baseline/Ensemble]" + $vbcrlf; 		$ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Niveau_Compliance).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Niveau_Compliance).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }	Else { $ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Niveau_Compliance).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Niveau_Compliance).Font.Bold = $False }
-			If ($ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Etat_Demon_NTP).Text -ne $Ref_ArrayNTPd) 				{ $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details).Text + "[≠ NTP démon/Ensemble]" + $vbcrlf; 		$ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Etat_Demon_NTP).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Etat_Demon_NTP).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }			Else { $ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Etat_Demon_NTP).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Etat_Demon_NTP).Font.Bold = $False }
-			If ($ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_Chemins).Text.Substring(0, $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_Chemins).Text.IndexOf(" ")) -ne $Ref_ArraySAN) { $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details)	=	$ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details).Text + "[≠ Chemins SAN/Ensemble]" + $vbcrlf; $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_Chemins).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_Chemins).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 } Else { $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_Chemins).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_Chemins).Font.Bold = $False }
-			If ($ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_LUNs).Text -ne $Ref_ArrayLUN) 						{ $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details).Text + "[≠ LUNs/Ensemble]" + $vbcrlf;			 	$ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_LUNs).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_LUNs).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 } 					Else { $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_LUNs).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_LUNs).Font.Bold = $False }
-			If ($ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_Chemins_MORTS).Text.Substring(0, $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_Chemins_MORTS).Text.IndexOf("(") - 1) -ne $Ref_ArraySANDeath) { $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details) =$ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details).Text + "[Chemin(s) mort(s)]" + $vbcrlf; $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_Chemins_MORTS).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_Chemins_MORTS).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 } Else { $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_Chemins_MORTS).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_Chemins_MORTS).Font.Bold = $False }
-			If ($ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_Chemins_ACTIFS).Text.Substring(0, $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_Chemins_ACTIFS).Text.IndexOf("(") - 1) -ne $Ref_ArraySANAlive) { $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details) =$ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details).Text + "[Chemin(s) présent(s)]" + $vbcrlf; $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_Chemins_ACTIFS).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_Chemins_ACTIFS).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 } Else { $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_Chemins_ACTIFS).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_Chemins_ACTIFS).Font.Bold = $False }
-			If ($ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Redondance_Chemins).Text -ne $Ref_ArraySANRedon) 			{ $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details).Text + "[Erreur redondance SAN]" + $vbcrlf; 		$ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Redondance_Chemins).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Redondance_Chemins).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 } 	Else { $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Redondance_Chemins).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Redondance_Chemins).Font.Bold = $False }
-			If ($ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Current_CPU_Policy).Text -ne $Ref_ArrayCPUPolicy)		{ $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details).Text + "[≠ CPU Policy/Ensemble]" + $vbcrlf; 		$ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Current_CPU_Policy).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Current_CPU_Policy).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 } 	Else { $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Current_CPU_Policy).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Current_CPU_Policy).Font.Bold = $False }
-			If ($ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Mode_HA).Text -ne $Ref_ArrayHA) 							{ $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details).Text + "[≠ HA/Ensemble]" + $vbcrlf; 				$ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Mode_HA).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Mode_HA).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 } 						Else { $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Mode_HA).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Mode_HA).Font.Bold = $False }
-			If ($ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Hyperthreading).Text -ne $Ref_ArrayHyperTh) 				{ $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details).Text + "[≠ HyperThreading/Ensemble]" + $vbcrlf; 	$ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Hyperthreading).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Hyperthreading).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 } 			Else { $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Hyperthreading).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Hyperthreading).Font.Bold = $False }
-			If ($ExcelWorkSheet.Cells.Item($l, $Excel_HOST_EVC).Text -ne $Ref_ArrayEVC) 							{ $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details).Text + "[≠ EVC/Ensemble]" + $vbcrlf; 				$ExcelWorkSheet.Cells.Item($l, $Excel_HOST_EVC).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_EVC).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 } 								Else { $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_EVC).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_EVC).Font.Bold = $False }
-			If ($ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Etat_Alarmes).Text -ne $Ref_ArrayAlarme)					{ $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details).Text + "[≠ Alarmes/Ensemble]" + $vbcrlf; 			$ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Etat_Alarmes).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Etat_Alarmes).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 } 				Else { $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Etat_Alarmes).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Etat_Alarmes).Font.Bold = $False }
-			If ($ExcelWorkSheet.Cells.Item($l, $Excel_HOST_TPS_Salting).Text -ne $Ref_ArrayTPS) 					{ $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details).Text + "[≠ TPS/Ensemble]" + $vbcrlf; 				$ExcelWorkSheet.Cells.Item($l, $Excel_HOST_TPS_Salting).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_TPS_Salting).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 } 				Else { $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_TPS_Salting).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_TPS_Salting).Font.Bold = $False }
-			If ($ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Larges_Pages_RAM).Text -ne $Ref_ArrayLPages) 			{ $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details).Text + "[≠ Large Pages/Ensemble]" + $vbcrlf; 		$ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Larges_Pages_RAM).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Larges_Pages_RAM).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 } 		Else { $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Larges_Pages_RAM).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Larges_Pages_RAM).Font.Bold = $False }
-			If ($ExcelWorkSheet.Cells.Item($l, $Excel_NETWORK_VLAN).Text.Substring(1, $ExcelWorkSheet.Cells.Item($l, $Excel_NETWORK_VLAN).Text.IndexOf(")") - 1) -ne $Ref_ArrayVLAN) { $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details)	= 	$ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details).Text + "[≠ VLANs/Ensemble]" + $vbcrlf; $ExcelWorkSheet.Cells.Item($l, $Excel_NETWORK_VLAN).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($l, $Excel_NETWORK_VLAN).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 } Else { $ExcelWorkSheet.Cells.Item($l, $Excel_NETWORK_VLAN).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($l, $Excel_NETWORK_VLAN).Font.Bold = $False }
-			If ($ExcelWorkSheet.Cells.Item($l, $Excel_NETWORK_Adaptateurs).Text.Substring(1, $ExcelWorkSheet.Cells.Item($l, $Excel_NETWORK_Adaptateurs).Text.IndexOf(")") - 1) -ne $Ref_ArrayLAN) { $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details)	= 	$ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details).Text + "[≠ Adaptateurs LAN/Ensemble]" + $vbcrlf; $ExcelWorkSheet.Cells.Item($l, $Excel_NETWORK_Adaptateurs).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($l, $Excel_NETWORK_Adaptateurs).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 } Else { $ExcelWorkSheet.Cells.Item($l, $Excel_NETWORK_Adaptateurs).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($l, $Excel_NETWORK_Adaptateurs).Font.Bold = $False }
+		If ($ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Statut_ESX).Text -ne "PoweredOff") {
+			If ($ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Serveurs_NTP).Font.ColorIndex -eq $Excel_Couleur_Error)	{ $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Text + "[Erreur NTP Serveur]" + $VBCrLF; 			$ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }
+			If ($ExcelWorkSheet.Cells.Item($L, $Excel_NETWORK_vMotion).Font.ColorIndex -eq $Excel_Couleur_Error)	{ $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Text + "[Erreur @IP vMotion]" + $VBCrLF; 			$ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }
+			If ($ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Balise).Text -ne $Ref_ArrayTag) 							{ $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Text + "[! Balise/Ensemble]" + $VBCrLF; 				$ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Balise).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Balise).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 } 							Else { $ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Balise).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Balise).Font.Bold = $False }
+			If ($ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Version).Text -ne $Ref_ArrayVersion) 					{ $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Text + "[! Version/Ensemble]" + $VBCrLF; 			$ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Version).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Version).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }						Else { $ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Version).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Version).Font.Bold = $False }
+			If ($ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Zone_Temps).Text -ne $Ref_ArrayTimeZone) 				{ $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Text + "[! TimeZone/Ensemble]" + $VBCrLF; 			$ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Zone_Temps).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Zone_Temps).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }					Else { $ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Zone_Temps).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Zone_Temps).Font.Bold = $False }
+			If ($ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Niveau_Compliance).Text -ne $Ref_ArrayBaseline) 			{ $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Text + "[! Baseline/Ensemble]" + $VBCrLF; 			$ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Niveau_Compliance).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Niveau_Compliance).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }	Else { $ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Niveau_Compliance).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Niveau_Compliance).Font.Bold = $False }
+			If ($ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Etat_Demon_NTP).Text -ne $Ref_ArrayNTPd) 				{ $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Text + "[! NTP démon/Ensemble]" + $VBCrLF; 			$ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Etat_Demon_NTP).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Etat_Demon_NTP).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }			Else { $ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Etat_Demon_NTP).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Etat_Demon_NTP).Font.Bold = $False }
+			If ($ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_Chemins).Text.Substring(0, $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_Chemins).Text.IndexOf(" ")) -ne $Ref_ArraySAN) { $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details)	=	$ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Text + "[! Chemins SAN/Ensemble]" + $VBCrLF; $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_Chemins).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_Chemins).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 } Else { $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_Chemins).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_Chemins).Font.Bold = $False }
+			If ($ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_LUNs).Text -ne $Ref_ArrayLUN) 						{ $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Text + "[! LUNs/Ensemble]" + $VBCrLF;			 	$ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_LUNs).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_LUNs).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 } 					Else { $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_LUNs).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_LUNs).Font.Bold = $False }
+			If ($ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_Chemins_MORTS).Text.Substring(0, $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_Chemins_MORTS).Text.IndexOf("(") - 1) -ne $Ref_ArraySANDeath) { $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details) =$ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Text + "[Chemin(s) mort(s)]" + $VBCrLF; $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_Chemins_MORTS).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_Chemins_MORTS).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 } Else { $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_Chemins_MORTS).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_Chemins_MORTS).Font.Bold = $False }
+			If ($ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_Chemins_ACTIFS).Text.Substring(0, $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_Chemins_ACTIFS).Text.IndexOf("(") - 1) -ne $Ref_ArraySANAlive) { $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details) =$ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Text + "[! Chemin(s) présent(s)]" + $VBCrLF; $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_Chemins_ACTIFS).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_Chemins_ACTIFS).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 } Else { $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_Chemins_ACTIFS).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_Chemins_ACTIFS).Font.Bold = $False }
+			If ($ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Redondance_Chemins).Text -ne "OK")			 			{ $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Text + "[Erreur redondance SAN]" + $VBCrLF; 		$ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Redondance_Chemins).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Redondance_Chemins).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 } 	Else { $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Redondance_Chemins).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Redondance_Chemins).Font.Bold = $False }
+			If ($ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Current_CPU_Policy).Text -ne $Ref_ArrayCPUPolicy)		{ $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Text + "[! CPU Policy/Ensemble]" + $VBCrLF; 		$ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Current_CPU_Policy).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Current_CPU_Policy).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 } 	Else { $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Current_CPU_Policy).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Current_CPU_Policy).Font.Bold = $False }
+			If ($ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Mode_HA).Text -ne $Ref_ArrayHA) 							{ $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Text + "[! HA/Ensemble]" + $VBCrLF; 				$ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Mode_HA).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Mode_HA).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 } 						Else { $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Mode_HA).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Mode_HA).Font.Bold = $False }
+			If ($ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Hyperthreading).Text -ne $Ref_ArrayHyperTh) 				{ $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Text + "[! HyperThreading/Ensemble]" + $VBCrLF; 	$ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Hyperthreading).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Hyperthreading).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 } 			Else { $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Hyperthreading).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Hyperthreading).Font.Bold = $False }
+			If ($ExcelWorkSheet.Cells.Item($L, $Excel_HOST_EVC).Text -ne $Ref_ArrayEVC) 							{ $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Text + "[! EVC/Ensemble]" + $VBCrLF; 				$ExcelWorkSheet.Cells.Item($L, $Excel_HOST_EVC).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_EVC).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 } 								Else { $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_EVC).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_EVC).Font.Bold = $False }
+			If ($ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Etat_Alarmes).Text -ne $Ref_ArrayAlarme)					{ $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Text + "[! Alarmes/Ensemble]" + $VBCrLF; 			$ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Etat_Alarmes).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Etat_Alarmes).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 } 				Else { $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Etat_Alarmes).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Etat_Alarmes).Font.Bold = $False }
+			If ($ExcelWorkSheet.Cells.Item($L, $Excel_HOST_TPS_Salting).Text -ne $Ref_ArrayTPS) 					{ $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Text + "[! TPS/Ensemble]" + $VBCrLF; 				$ExcelWorkSheet.Cells.Item($L, $Excel_HOST_TPS_Salting).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_TPS_Salting).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 } 				Else { $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_TPS_Salting).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_TPS_Salting).Font.Bold = $False }
+			If ($ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Larges_Pages_RAM).Text -ne $Ref_ArrayLPages) 			{ $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Text + "[! Large Pages/Ensemble]" + $VBCrLF; 		$ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Larges_Pages_RAM).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Larges_Pages_RAM).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 } 		Else { $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Larges_Pages_RAM).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Larges_Pages_RAM).Font.Bold = $False }
+			If ($ExcelWorkSheet.Cells.Item($L, $Excel_NETWORK_VLAN).Text.Substring(1, $ExcelWorkSheet.Cells.Item($L, $Excel_NETWORK_VLAN).Text.IndexOf(")") - 1) -ne $Ref_ArrayVLAN) { $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details)	= 	$ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Text + "[! VLANs/Ensemble]" + $VBCrLF; $ExcelWorkSheet.Cells.Item($L, $Excel_NETWORK_VLAN).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($L, $Excel_NETWORK_VLAN).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 } Else { $ExcelWorkSheet.Cells.Item($L, $Excel_NETWORK_VLAN).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($L, $Excel_NETWORK_VLAN).Font.Bold = $False }
+			If ($ExcelWorkSheet.Cells.Item($L, $Excel_NETWORK_Adaptateurs).Text.Substring(1, $ExcelWorkSheet.Cells.Item($L, $Excel_NETWORK_Adaptateurs).Text.IndexOf(")") - 1) -ne $Ref_ArrayLAN) { $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details)	= 	$ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Text + "[! Adaptateurs LAN/Ensemble]" + $VBCrLF; $ExcelWorkSheet.Cells.Item($L, $Excel_NETWORK_Adaptateurs).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($L, $Excel_NETWORK_Adaptateurs).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 } Else { $ExcelWorkSheet.Cells.Item($L, $Excel_NETWORK_Adaptateurs).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($L, $Excel_NETWORK_Adaptateurs).Font.Bold = $False }
 			
 			### Inscription du pourcentage de conformité
-			$ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Globale)= "[" + [math]::round((100 - (($ESX_Percent_NotCompliant / 20) * 100)), 0) + "% conforme]"
-			$ESX_Percent_NotCompliant_AVE = [math]::round(($ESX_Percent_NotCompliant_AVE + (100 - (($ESX_Percent_NotCompliant / 20) * 100))) / 2, 2)
+			$ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Globale)= "[" + [math]::round((100 - (($ESX_Percent_NotCompliant / $ESX_Item_CheckType) * 100)), 0) + "% conforme]"
+			$ESX_Percent_NotCompliant_AVE = [math]::round(($ESX_Percent_NotCompliant_AVE + (100 - (($ESX_Percent_NotCompliant / $ESX_Item_CheckType) * 100))) / 2, 2)
 		}
 		Else {
-			$ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Globale) = "-"
-			$ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details) = "ESXi OFF..."
+			$ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Globale) = "-"
+			$ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details) = "ESXi OFF..."
 		}
 		
 		### Mise à jour de la colonne TimeStamp
-		$ExcelWorkSheet.Cells.Item($l, $Excel_TimeStamp) = Get-Date -UFormat "%Y/%m/%d %H:%M:%S"
+		$ExcelWorkSheet.Cells.Item($L, $Excel_TimeStamp) = Get-Date -UFormat "%Y/%m/%d %H:%M:%S"
+		
+		### Valorisation des compteurs totaux
+		If ($Excel_Conformite_Globale -eq "100%") {
+			$ESX_Compliant += 1 }
+		Else {
+			$ESX_NotCompliant += 1
+		}
+		$ESX_NotCompliant_Total = $ESX_NotCompliant_Item
 	}
 	
+	LogTrace ("-- Appel de la fonction 'Get-ElapsedTime'")
 	Get-ElapsedTime
 	
-	Write-Host "Vérification de l'homogénéité des données ESXi ciblés... " -NoNewLine
-	Write-Host "(Terminée)`r`n" -ForegroundColor Black -BackgroundColor White
+	Write-Host "Vérification de l'homogénéité des données ESXi ciblés...`t" -NoNewLine
+	Write-Host "Terminée`r`n" -ForegroundColor Black -BackgroundColor White
 	Write-Host "--- En résumé: ---`r`n * vCenter: $vCenter`r`n * Cluster: $Cluster`r`n * Différence(s): $ESX_NotCompliant_Item`r`n * Taux moyen de conformité: $ESX_Percent_NotCompliant_AVE%`r`n------------------`r`n" -ForegroundColor White
 	LogTrace ("Vérification de l'homogénéité des données du cluster... (Terminée)")
 	Logtrace ("--- En résumé: ---`r`n * vCenter: $vCenter`r`n * Cluster: $Cluster`r`n * Différence(s): $ESX_NotCompliant_Item`r`n * Taux moyen de conformité: $ESX_Percent_NotCompliant_AVE%`r`n------------------`r`n")
@@ -705,6 +904,24 @@ Function Get-ESX_Compare_Cibles {
 
 ### Fonction chargée de la comparaison/l'homogénéité des valeurs avec celles du fichier de référence
 Function Get-ESX_Compare_CiblesvsReference {
+
+	### Initialisation des variables de références
+	$Ref_ArrayVersion	= $Null
+	$Ref_ArrayTimeZone 	= $Null
+	$Ref_ArrayBaseline 	= $Null
+	$Ref_ArrayNTPd	 	= $Null
+	$Ref_ArraySAN		= $Null
+	$Ref_ArrayLUN		= $Null
+	$Ref_ArrayCPUPolicy	= $Null
+	$Ref_ArrayHA		= $Null
+	$Ref_ArrayHyperTh	= $Null
+	$Ref_ArrayEVC		= $Null
+	$Ref_ArrayAlarme	= $Null
+	$Ref_ArrayTPS 		= $Null
+	$Ref_ArrayLPages 	= $Null
+	$Ref_ArrayVLAN		= $Null
+	$Ref_ArrayLAN		= $Null
+
 	### Recherche du cluster relatif à l'ESXi ciblé dans la feuille de référence Excel
 	$GetName = $ExcelWorkSheet_Ref.Range("A1").EntireColumn.Find("$Cluster")
 	
@@ -713,14 +930,20 @@ Function Get-ESX_Compare_CiblesvsReference {
 		
 		### Si les paramètres du fichier .BAT laissent supposer qu'il s'agit d'un nouveau cluster
 		If ($ESX_Inc -eq "TOUS" -and $ESX_Exc -eq "AUCUN") {
+			LogTrace ("-- Appel de la fonction 'Get-ESX_Compare_Cibles'")
 			Get-ESX_Compare_Cibles
+			
 			Write-Host "Le fichier de référence va être mis à jour avec les nouvelles valeurs..." -ForegroundColor Yellow
 			LogTrace ("Le fichier de référence va être mis à jour avec les nouvelles valeurs...")
+			
+			LogTrace ("-- Appel de la fonction 'Get-Ajout_Nouveau_Cluster'")
 			Get-Ajout_Nouveau_Cluster
 		}
 		Else {
 			Write-Host "Comparaison des ESXi ciblés impossible, cluster non trouvé... (Terminée)`r`n"
 			LogTrace ("Comparaison des ESXi ciblés impossible, cluster non trouvé... (Terminée)")
+			
+			LogTrace ("-- Appel de la fonction 'Get-ESX_Compare_Cibles'")
 			Get-ESX_Compare_Cibles
 		}
 	}
@@ -729,9 +952,13 @@ Function Get-ESX_Compare_CiblesvsReference {
 	Else {
 		### Si les paramètres du fichier .BAT laissent supposer qu'il s'agit d'un nouveau cluster
 		If ($ESX_Inc -eq "TOUS" -and $ESX_Exc -eq "AUCUN") {
+			LogTrace ("-- Appel de la fonction 'Get-ESX_Compare_Cibles'")
 			Get-ESX_Compare_Cibles
+			
 			Write-Host "Le fichier de référence va être mis à jour avec les nouvelles valeurs..." -ForegroundColor Yellow
 			LogTrace ("Le fichier de référence va être mis à jour avec les nouvelles valeurs...")
+			
+			LogTrace ("-- Appel de la fonction 'Get-Ajout_Nouveau_Cluster'")
 			Get-Ajout_Nouveau_Cluster
 		}
 		Else {
@@ -760,8 +987,10 @@ Function Get-ESX_Compare_CiblesvsReference {
 				$Ref_ArrayTPS 		= $ExcelWorkSheet_Ref.Cells.Item($GetName.Row, $Excel_Ref_ArrayTPS).Text		# Ligne, Colonne
 				$Ref_ArrayLPages 	= $ExcelWorkSheet_Ref.Cells.Item($GetName.Row, $Excel_Ref_ArrayLPages).Text		# Ligne, Colonne
 				$Ref_ArrayVLAN		= $ExcelWorkSheet_Ref.Cells.Item($GetName.Row, $Excel_Ref_ArrayVLAN).Text		# Ligne, Colonne
+				$Ref_ArrayLAN		= $ExcelWorkSheet_Ref.Cells.Item($GetName.Row, $Excel_Ref_ArrayLAN).Text		# Ligne, Colonne
 			}
 			
+			LogTrace ("-- Appel de la fonction 'Get-ElapsedTime'")
 			Get-ElapsedTime
 
 			### Vérification des données par rapport aux valeurs majoritaires
@@ -774,36 +1003,52 @@ Function Get-ESX_Compare_CiblesvsReference {
 			$ESX_NotCompliant_Item = 0
 
 			$ExcelLine = ($ExcelLine_Start..$($ExcelLine_Start + $ESX_Counter - 1))
-			ForEach($l in $ExcelLine)	{
+			LogTrace ("-- Traitement Excel de la ligne $ExcelLine_Start à la ligne $($ExcelLine_Start + $ESX_Counter - 1)")
+			ForEach($L in $ExcelLine)	{
 				$ESX_Percent_NotCompliant = 0
 				
 				### Si le nom du cluster existe dans la feuille de référence ET que l'ESXi n'est pas arrêté
 				If ($GetName.Row -and $ExcelWorkSheet.Cells.Item($GetName.Row, $Excel_CONF_Statut_ESX).Text -ne "PoweredOff") {
-					If ($ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Serveurs_NTP).Font.ColorIndex -eq $Excel_Couleur_Error)	{ $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details).Text + "[Erreur NTP Serveur]" + $vbcrlf; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }
-					If ($ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Version).Text -ne $Ref_ArrayVersion) 					{ $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details).Text + "[≠ Version/Référence]" + $vbcrlf; $ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Version).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Version).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }							Else { $ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Version).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Version).Font.Bold = $False }
-					If ($ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Zone_Temps).Text -ne $Ref_ArrayTimeZone)					{ $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details).Text + "[≠ TimeZone/Référence]" + $vbcrlf; $ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Zone_Temps).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Zone_Temps).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }						Else { $ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Zone_Temps).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Zone_Temps).Font.Bold = $False }
-					If ($ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Niveau_Compliance).Text -ne $Ref_ArrayBaseline) 			{ $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details).Text + "[≠ Baseline/Référence]" + $vbcrlf; $ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Niveau_Compliance).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Niveau_Compliance).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }		Else { $ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Niveau_Compliance).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Niveau_Compliance).Font.Bold = $False }
-					If ($ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Etat_Demon_NTP).Text -ne $Ref_ArrayNTPd) 				{ $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details).Text + "[≠ NTP démon/Référence]" + $vbcrlf; $ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Etat_Demon_NTP).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Etat_Demon_NTP).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }			Else { $ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Etat_Demon_NTP).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Etat_Demon_NTP).Font.Bold = $False }
-					If ($ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_Chemins).Text.Substring(0, $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_Chemins).Text.IndexOf(" ")) -ne $Ref_ArraySAN)		{ $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details).Text + "[≠ Chemins SAN/Référence]" + $vbcrlf; 	$ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_Chemins).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_Chemins).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }	Else { $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_Chemins).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_Chemins).Font.Bold = $False }
-					If ($ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_LUNs).Text -ne $Ref_ArrayLUN)						{ $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details).Text + "[≠ LUNs/Référence]" + $vbcrlf; 	$ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_LUNs).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_LUNs).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }						Else { $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_LUNs).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_LUNs).Font.Bold = $False }
-					If ($ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Current_CPU_Policy).Text -ne $Ref_ArrayCPUPolicy)		{ $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details).Text + "[≠ CPU Policy/Référence]" + $vbcrlf; $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Current_CPU_Policy).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Current_CPU_Policy).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1}	Else { $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Current_CPU_Policy).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Current_CPU_Policy).Font.Bold = $False }
-					If ($ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Mode_HA).Text -ne $Ref_ArrayHA) 							{ $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details).Text + "[≠ HA/Référence]" + $vbcrlf; $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Mode_HA).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Mode_HA).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 } 								Else { $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Mode_HA).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Mode_HA).Font.Bold = $False }
-					If ($ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Hyperthreading).Text -ne $Ref_ArrayHyperTh) 				{ $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details).Text + "[≠ HyperThreading/Référence]" + $vbcrlf;$ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Hyperthreading).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Hyperthreading).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }		Else { $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Hyperthreading).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Hyperthreading).Font.Bold = $False }
-					If ($ExcelWorkSheet.Cells.Item($l, $Excel_HOST_EVC).Text -ne $Ref_ArrayEVC) 							{ $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details).Text + "[≠ EVC/Référence]" + $vbcrlf; $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_EVC).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_EVC).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 } 										Else { $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_EVC).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_EVC).Font.Bold = $False }
-					If ($ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Etat_Alarmes).Text -ne $Ref_ArrayAlarme)					{ $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details).Text + "[≠ Alarmes/Référence]" + $vbcrlf; $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Etat_Alarmes).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Etat_Alarmes).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }					Else { $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Etat_Alarmes).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Etat_Alarmes).Font.Bold = $False }
-					If ($ExcelWorkSheet.Cells.Item($l, $Excel_HOST_TPS_Salting).Text -ne $Ref_ArrayTPS) 					{ $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details).Text + "[≠ TPS/Référence]" + $vbcrlf; $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_TPS_Salting).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_TPS_Salting).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }						Else { $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_TPS_Salting).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_TPS_Salting).Font.Bold = $False }
-					If ($ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Larges_Pages_RAM).Text -ne $Ref_ArrayLPages) 			{ $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details).Text + "[≠ Large Pages/Référence]" + $vbcrlf; $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Larges_Pages_RAM).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Larges_Pages_RAM).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1}		Else { $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Larges_Pages_RAM).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Larges_Pages_RAM).Font.Bold = $False }
-					If ($ExcelWorkSheet.Cells.Item($l, $Excel_NETWORK_VLAN).Text.Substring(1, $ExcelWorkSheet.Cells.Item($l, $Excel_NETWORK_VLAN).Text.IndexOf(")") - 1) -ne $Ref_ArrayVLAN) 	{ $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Details).Text + "[≠ VLAN/Référence]" + $vbcrlf; 			$ExcelWorkSheet.Cells.Item($l, $Excel_NETWORK_VLAN).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($l, $Excel_NETWORK_VLAN).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }	Else { $ExcelWorkSheet.Cells.Item($l, $Excel_NETWORK_VLAN).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($l, $Excel_NETWORK_VLAN).Font.Bold = $False }
+					If ($ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Serveurs_NTP).Font.ColorIndex -eq $Excel_Couleur_Error)	{ $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Text + "[Erreur NTP Serveur]" + $VBCrLF; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }
+					If ($ExcelWorkSheet.Cells.Item($L, $Excel_NETWORK_vMotion).Font.ColorIndex -eq $Excel_Couleur_Error)	{ $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Text + "[Erreur @IP vMotion]" + $VBCrLF; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }
+					If ($ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Version).Text -ne $Ref_ArrayVersion) 					{ $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Text + "[! Version/Référence]" + $VBCrLF; $ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Version).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Version).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }							Else { $ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Version).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Version).Font.Bold = $False }
+					If ($ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Zone_Temps).Text -ne $Ref_ArrayTimeZone)					{ $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Text + "[! TimeZone/Référence]" + $VBCrLF; $ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Zone_Temps).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Zone_Temps).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }					Else { $ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Zone_Temps).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Zone_Temps).Font.Bold = $False }
+					If ($ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Niveau_Compliance).Text -ne $Ref_ArrayBaseline) 			{ $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Text + "[! Baseline/Référence]" + $VBCrLF; $ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Niveau_Compliance).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Niveau_Compliance).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }		Else { $ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Niveau_Compliance).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Niveau_Compliance).Font.Bold = $False }
+					If ($ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Etat_Demon_NTP).Text -ne $Ref_ArrayNTPd) 				{ $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Text + "[! NTP démon/Référence]" + $VBCrLF; $ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Etat_Demon_NTP).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Etat_Demon_NTP).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }			Else { $ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Etat_Demon_NTP).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Etat_Demon_NTP).Font.Bold = $False }
+					If ($ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_Chemins).Text.Substring(0, $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_Chemins).Text.IndexOf(" ")) -ne $Ref_ArraySAN)		{ $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Text + "[! Chemins SAN/Référence]" + $VBCrLF; 	$ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_Chemins).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_Chemins).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }	Else { $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_Chemins).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_Chemins).Font.Bold = $False }
+					If ($ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_LUNs).Text -ne $Ref_ArrayLUN)						{ $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Text + "[! LUNs/Référence]" + $VBCrLF; 	$ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_LUNs).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_LUNs).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }						Else { $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_LUNs).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_LUNs).Font.Bold = $False }
+					If ($ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Current_CPU_Policy).Text -ne $Ref_ArrayCPUPolicy)		{ $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Text + "[! CPU Policy/Référence]" + $VBCrLF; $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Current_CPU_Policy).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Current_CPU_Policy).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1}	Else { $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Current_CPU_Policy).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Current_CPU_Policy).Font.Bold = $False }
+					If ($ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Mode_HA).Text -ne $Ref_ArrayHA) 							{ $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Text + "[! HA/Référence]" + $VBCrLF; $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Mode_HA).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Mode_HA).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 } 								Else { $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Mode_HA).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Mode_HA).Font.Bold = $False }
+					If ($ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Hyperthreading).Text -ne $Ref_ArrayHyperTh) 				{ $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Text + "[! HyperThreading/Référence]" + $VBCrLF;$ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Hyperthreading).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Hyperthreading).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }		Else { $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Hyperthreading).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Hyperthreading).Font.Bold = $False }
+					If ($ExcelWorkSheet.Cells.Item($L, $Excel_HOST_EVC).Text -ne $Ref_ArrayEVC) 							{ $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Text + "[! EVC/Référence]" + $VBCrLF; $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_EVC).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_EVC).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 } 										Else { $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_EVC).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_EVC).Font.Bold = $False }
+					If ($ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Etat_Alarmes).Text -ne $Ref_ArrayAlarme)					{ $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Text + "[! Alarmes/Référence]" + $VBCrLF; $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Etat_Alarmes).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Etat_Alarmes).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }				Else { $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Etat_Alarmes).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Etat_Alarmes).Font.Bold = $False }
+					If ($ExcelWorkSheet.Cells.Item($L, $Excel_HOST_TPS_Salting).Text -ne $Ref_ArrayTPS) 					{ $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Text + "[! TPS/Référence]" + $VBCrLF; $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_TPS_Salting).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_TPS_Salting).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }						Else { $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_TPS_Salting).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_TPS_Salting).Font.Bold = $False }
+					If ($ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Larges_Pages_RAM).Text -ne $Ref_ArrayLPages) 			{ $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Text + "[! Large Pages/Référence]" + $VBCrLF; $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Larges_Pages_RAM).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Larges_Pages_RAM).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1}		Else { $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Larges_Pages_RAM).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Larges_Pages_RAM).Font.Bold = $False }
+					If ($ExcelWorkSheet.Cells.Item($L, $Excel_NETWORK_VLAN).Text.Substring(1, $ExcelWorkSheet.Cells.Item($L, $Excel_NETWORK_VLAN).Text.IndexOf(")") - 1) -ne $Ref_ArrayVLAN) 	{ $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Text + "[! VLAN/Référence]" + $VBCrLF; 			$ExcelWorkSheet.Cells.Item($L, $Excel_NETWORK_VLAN).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($L, $Excel_NETWORK_VLAN).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }	Else { $ExcelWorkSheet.Cells.Item($L, $Excel_NETWORK_VLAN).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($L, $Excel_NETWORK_VLAN).Font.Bold = $False }
+					If ($ExcelWorkSheet.Cells.Item($L, $Excel_NETWORK_Adaptateurs).Text.Substring(1, $ExcelWorkSheet.Cells.Item($L, $Excel_NETWORK_Adaptateurs).Text.IndexOf(")") - 1) -ne $Ref_ArrayLAN) 	{ $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details)	= $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Text + "[! Adaptateurs LAN/Référence]" + $VBCrLF; 			$ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Font.Bold = $True; $ESX_NotCompliant_Item += 1; $ESX_Percent_NotCompliant += 1 }	Else { $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Font.ColorIndex = 1; $ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details).Font.Bold = $False }
 
 					### Inscription du pourcentage de conformité
-					$ExcelWorkSheet.Cells.Item($l, $Excel_Conformite_Globale) = "[" + [math]::round((100 - (($ESX_Percent_NotCompliant / 15) * 100)), 0) + "% conforme]"
-					$ESX_Percent_NotCompliant_AVE = [math]::round(($ESX_Percent_NotCompliant_AVE + (100 - (($ESX_Percent_NotCompliant / 15) * 100))) / 2, 2)
+					$ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Globale) = "[" + [math]::round((100 - (($ESX_Percent_NotCompliant / 17) * 100)), 0) + "% conforme]"
+					$ESX_Percent_NotCompliant_AVE = [math]::round(($ESX_Percent_NotCompliant_AVE + (100 - (($ESX_Percent_NotCompliant / 17) * 100))) / 2, 2)
+				}
+				Else {
+					$ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Globale) = "-"
+					$ExcelWorkSheet.Cells.Item($L, $Excel_Conformite_Details) = "-"
 				}
 				
 				### Mise à jour de la colonne TimeStamp
-				$ExcelWorkSheet.Cells.Item($l, $Excel_TimeStamp) = Get-Date -UFormat "%Y/%m/%d %H:%M:%S"
+				$ExcelWorkSheet.Cells.Item($L, $Excel_TimeStamp) = Get-Date -UFormat "%Y/%m/%d %H:%M:%S"
+				
+				### Valorisation des compteurs totaux
+				If ($Excel_Conformite_Globale -eq "100%") {
+					$ESX_Compliant += 1 }
+				Else {
+					$ESX_NotCompliant += 1
+				}
+				$ESX_NotCompliant_Total = $ESX_NotCompliant_Item
 			}
 
+			LogTrace ("-- Appel de la fonction 'Get-ElapsedTime'")
 			Get-ElapsedTime
 
 			Write-Host "Comparaison des ESXi ciblés avec les références clusters... (Terminée)`r`n"
@@ -819,6 +1064,7 @@ Function Get-ESX_Compare_CiblesvsReference {
 
 ### Fonction chargée de la comparaison/l'homogénéité des valeurs entre elles
 Function Get-Ajout_Nouveau_Cluster {
+
 	Write-Host "Ajout/Mise à jour du cluster dans les références...`t" -NoNewLine
 	Write-Host "En cours" -ForegroundColor Green
 	LogTrace ("Ajout/Mise à jour du cluster dans les références...")
@@ -827,7 +1073,23 @@ Function Get-Ajout_Nouveau_Cluster {
 	Write-Host " * Initialisation de la matrice `t`t`t" -NoNewLine -ForegroundColor DarkYellow
 	LogTrace (" * Initialisation de la matrice")
 	$ElapsedTime_Start = (Get-Date)
-
+	
+	$Ref_ArrayVersion	= $Null
+	$Ref_ArrayTimeZone 	= $Null
+	$Ref_ArrayBaseline 	= $Null
+	$Ref_ArrayNTPd	 	= $Null
+	$Ref_ArraySAN 		= $Null
+	$Ref_ArrayLUN 		= $Null
+	$Ref_ArrayCPUPolicy	= $Null
+	$Ref_ArrayHA		= $Null
+	$Ref_ArrayHyperTh	= $Null
+	$Ref_ArrayEVC		= $Null
+	$Ref_ArrayAlarme	= $Null
+	$Ref_ArrayTPS 		= $Null
+	$Ref_ArrayLPages	= $Null
+	$Ref_ArrayVLAN 		= $Null
+	$Ref_ArrayLAN 		= $Null
+	
 	$ArrayVersion 	= @()	# Initialisation du tableau relatif à la version ESXi
 	$ArrayTimeZone	= @()	# Initialisation du tableau relatif à la TimeZone
 	$ArrayBaseline	= @()	# Initialisation du tableau relatif à la Baseline
@@ -844,6 +1106,7 @@ Function Get-Ajout_Nouveau_Cluster {
 	$ArrayVLAN 		= @()	# Initialisation du tableau relatif au nombre de VLAN ESXi
 	$ArrayLAN 		= @()	# Initialisation du tableau relatif au nombre d'adaptateurs LAN
 
+	LogTrace ("-- Appel de la fonction 'Get-ElapsedTime'")
 	Get-ElapsedTime
 
 	### Valorisation des tableaux relatifs aux colonnes à vérifier
@@ -853,23 +1116,26 @@ Function Get-Ajout_Nouveau_Cluster {
 	
 	# Boucle déterminant la première ligne Excel du cluster à la dernière
 	$ExcelLine = ($ExcelLine_Start..$($ExcelLine_Start + $ESX_Counter - 1))
-	ForEach($l in $ExcelLine)	{
-		$ArrayVersion	+= $ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Version).Text
-		$ArrayTimeZone 	+= $ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Zone_Temps).Text
-		$ArrayBaseline 	+= $ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Niveau_Compliance).Text
-		$ArrayNTPd	 	+= $ExcelWorkSheet.Cells.Item($l, $Excel_CONF_Etat_Demon_NTP).Text
-		$ArraySAN 		+= $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_Chemins).Text.Substring(0, $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_Chemins).Text.IndexOf(" "))
-		$ArrayLUN 		+= $ExcelWorkSheet.Cells.Item($l, $Excel_SAN_Total_LUNs).Text
-		$ArrayCPUPolicy	+= $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Current_CPU_Policy).Text
-		$ArrayHA		+= $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Mode_HA).Text
-		$ArrayHyperTh	+= $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Hyperthreading).Text
-		$ArrayEVC		+= $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_EVC).Text
-		$ArrayAlarme	+= $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Etat_Alarmes).Text
-		$ArrayTPS 		+= $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_TPS_Salting).Text
-		$ArrayLPages 	+= $ExcelWorkSheet.Cells.Item($l, $Excel_HOST_Larges_Pages_RAM).Text
-		$ArrayVLAN 		+= $ExcelWorkSheet.Cells.Item($l, $Excel_NETWORK_VLAN).Text.Substring(1, $ExcelWorkSheet.Cells.Item($l, $Excel_NETWORK_VLAN).Text.IndexOf(")") - 1)
-		$ArrayLAN 		+= $ExcelWorkSheet.Cells.Item($l, $Excel_NETWORK_Adaptateurs).Text.Substring(1, $ExcelWorkSheet.Cells.Item($l, $Excel_NETWORK_Adaptateurs).Text.IndexOf(")") - 1)
+	LogTrace ("-- Traitement Excel de la ligne $ExcelLine_Start à la ligne $($ExcelLine_Start + $ESX_Counter - 1)")
+	ForEach($L in $ExcelLine)	{
+		$ArrayVersion	+= $ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Version).Text
+		$ArrayTimeZone 	+= $ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Zone_Temps).Text
+		$ArrayBaseline 	+= $ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Niveau_Compliance).Text
+		$ArrayNTPd	 	+= $ExcelWorkSheet.Cells.Item($L, $Excel_CONF_Etat_Demon_NTP).Text
+		$ArraySAN 		+= $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_Chemins).Text.Substring(0, $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_Chemins).Text.IndexOf(" "))
+		$ArrayLUN 		+= $ExcelWorkSheet.Cells.Item($L, $Excel_SAN_Total_LUNs).Text
+		$ArrayCPUPolicy	+= $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Current_CPU_Policy).Text
+		$ArrayHA		+= $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Mode_HA).Text
+		$ArrayHyperTh	+= $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Hyperthreading).Text
+		$ArrayEVC		+= $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_EVC).Text
+		$ArrayAlarme	+= $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Etat_Alarmes).Text
+		$ArrayTPS 		+= $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_TPS_Salting).Text
+		$ArrayLPages 	+= $ExcelWorkSheet.Cells.Item($L, $Excel_HOST_Larges_Pages_RAM).Text
+		$ArrayVLAN 		+= $ExcelWorkSheet.Cells.Item($L, $Excel_NETWORK_VLAN).Text.Substring(1, $ExcelWorkSheet.Cells.Item($L, $Excel_NETWORK_VLAN).Text.IndexOf(")") - 1)
+		$ArrayLAN 		+= $ExcelWorkSheet.Cells.Item($L, $Excel_NETWORK_Adaptateurs).Text.Substring(1, $ExcelWorkSheet.Cells.Item($L, $Excel_NETWORK_Adaptateurs).Text.IndexOf(")") - 1)
 	}
+	
+	LogTrace ("-- Appel de la fonction 'Get-ElapsedTime'")
 	Get-ElapsedTime
 
 	### Détermination des valeurs de références (majoritaires)
@@ -893,6 +1159,7 @@ Function Get-Ajout_Nouveau_Cluster {
 	$Ref_ArrayVLAN 		= ($ArrayVLAN 		| Group | ?{ $_.Count -gt ($ESX_Counter/2) }).Values | Select -Last 1
 	$Ref_ArrayLAN 		= ($ArrayLAN 		| Group | ?{ $_.Count -gt ($ESX_Counter/2) }).Values | Select -Last 1
 	
+	LogTrace ("-- Appel de la fonction 'Get-ElapsedTime'")
 	Get-ElapsedTime
 	
 	### Inscription des valeurs de références par cluster dans la 2ème feuille du fichier Excel
@@ -924,13 +1191,15 @@ Function Get-Ajout_Nouveau_Cluster {
 			If ($Ref_ArrayVLAN) 		{ $ExcelWorkSheet_Ref.Cells.Item($GetName.Row, $Excel_Ref_ArrayVLAN) 		= $Ref_ArrayVLAN 		} Else { $ExcelWorkSheet_Ref.Cells.Item($GetName.Row, $Excel_Ref_ArrayVLAN)			= "-" }
 			If ($Ref_ArrayLAN) 			{ $ExcelWorkSheet_Ref.Cells.Item($GetName.Row, $Excel_Ref_ArrayLAN)			= $Ref_ArrayLAN 		} Else { $ExcelWorkSheet_Ref.Cells.Item($GetName.Row, $Excel_Ref_ArrayLAN)			= "-" }
 		}
+		
 		Switch -Wildcard ($vCenter)	{
-			"*VCSZ*"  { $ExcelWorkSheet_Ref.Cells.Item($GetName.Row, $Excel_Ref_ENVironnement)	= "PRODUCTION" }
-			"*VCSY*"  { $ExcelWorkSheet_Ref.Cells.Item($GetName.Row, $Excel_Ref_ENVironnement) 	= "NON PRODUCTION" }
-			"*VCSQ*"  { $ExcelWorkSheet_Ref.Cells.Item($GetName.Row, $Excel_Ref_ENVironnement) 	= "CLOUD" }
-			"*VCSZY*" { $ExcelWorkSheet_Ref.Cells.Item($GetName.Row, $Excel_Ref_ENVironnement) 	= "SITES ADMINISTRATIFS" }
-			"*VCSSA*" { $ExcelWorkSheet_Ref.Cells.Item($GetName.Row, $Excel_Ref_ENVironnement) 	= "BAC A SABLE" }
-			Default	{ $ExcelWorkSheet_Ref.Cells.Item($GetName.Row, $Excel_Ref_ENVironnement) 	= "NA" }
+			"*VCSZ*" { $ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_ENVironnement)	= "PRODUCTION" }
+			"*VCSY*" { $ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_ENVironnement)	= "NON PRODUCTION" }
+			"*VCSQ*" { $ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_ENVironnement)	= "CLOUD" }
+			"*VCSZY*" { $ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_ENVironnement) 	= "SITES ADMINISTRATIFS" }
+			"*VCSSA*" { $ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_ENVironnement)	= "BAC A SABLE" }
+			"*VCS00*" { $ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_ENVironnement)	= "PVM" }
+			Default	{ $ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_ENVironnement)		= "NA" }
 		}
 	}
 	Else {
@@ -955,19 +1224,22 @@ Function Get-Ajout_Nouveau_Cluster {
 			If ($Ref_ArrayVLAN) 		{ $ExcelWorkSheet_Ref.Cells.Item($GetName.Row, $Excel_Ref_ArrayVLAN) 		= $Ref_ArrayVLAN 		} Else { $ExcelWorkSheet_Ref.Cells.Item($GetName.Row, $Excel_Ref_ArrayVLAN)			= "-" }
 			If ($Ref_ArrayLAN) 			{ $ExcelWorkSheet_Ref.Cells.Item($GetName.Row, $Excel_Ref_ArrayLAN)			= $Ref_ArrayLAN 		} Else { $ExcelWorkSheet_Ref.Cells.Item($GetName.Row, $Excel_Ref_ArrayLAN)			= "-" }
 		}
+					
 		Switch -Wildcard ($vCenter)	{
-			"*VCSZ*"  { $ExcelWorkSheet_Ref.Cells.Item($GetName.Row, $Excel_Ref_ENVironnement)	= "PRODUCTION" }
-			"*VCSY*"  { $ExcelWorkSheet_Ref.Cells.Item($GetName.Row, $Excel_Ref_ENVironnement) 	= "NON PRODUCTION" }
-			"*VCSQ*"  { $ExcelWorkSheet_Ref.Cells.Item($GetName.Row, $Excel_Ref_ENVironnement) 	= "CLOUD" }
-			"*VCSZY*" { $ExcelWorkSheet_Ref.Cells.Item($GetName.Row, $Excel_Ref_ENVironnement) 	= "SITES ADMINISTRATIFS" }
-			"*VCSSA*" { $ExcelWorkSheet_Ref.Cells.Item($GetName.Row, $Excel_Ref_ENVironnement) 	= "BAC A SABLE" }
-			Default	{ $ExcelWorkSheet_Ref.Cells.Item($GetName.Row, $Excel_Ref_ENVironnement) 	= "NA" }
+			"*VCSZ*" { $ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_ENVironnement)	= "PRODUCTION" }
+			"*VCSY*" { $ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_ENVironnement)	= "NON PRODUCTION" }
+			"*VCSQ*" { $ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_ENVironnement)	= "CLOUD" }
+			"*VCSZY*" { $ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_ENVironnement) 	= "SITES ADMINISTRATIFS" }
+			"*VCSSA*" { $ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_ENVironnement)	= "BAC A SABLE" }
+			"*VCS00*" { $ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_ENVironnement)	= "PVM" }
+			Default	{ $ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_ENVironnement)		= "NA" }
 		}
 	}
 
 	### Mise à jour de la colonne TimeStamp
 	$ExcelWorkSheet_Ref.Cells.Item($GetName.Row, $Excel_Ref_TimeStamp) = Get-Date -UFormat "%Y/%m/%d %H:%M:%S"
 	
+	LogTrace ("-- Appel de la fonction 'Get-ElapsedTime'")
 	Get-ElapsedTime
 	
 	$ExcelWorkBook_Ref.Save()
@@ -985,6 +1257,18 @@ Function Get-Cluster_Compare {
 	LogTrace (" * Initialisation de la matrice")
 	$ElapsedTime_Start = (Get-Date)
 	
+	$Ref_ArrayVersion	= $Null
+	$Ref_ArrayTimeZone 	= $Null
+	$Ref_ArrayBaseline 	= $Null
+	$Ref_ArrayNTPd	 	= $Null
+	$Ref_ArrayCPUPolicy	= $Null
+	$Ref_ArrayHA		= $Null
+	$Ref_ArrayHyperTh	= $Null
+	$Ref_ArrayEVC		= $Null
+	$Ref_ArrayAlarme	= $Null
+	$Ref_ArrayTPS 		= $Null
+	$Ref_ArrayLPages	= $Null
+		
 	$ArrayVersion 	= @()	# Initialisation du tableau relatif à la version ESXi
 	$ArrayTimeZone	= @()	# Initialisation du tableau relatif à la TimeZone
 	$ArrayBaseline	= @()	# Initialisation du tableau relatif à la Baseline
@@ -997,6 +1281,7 @@ Function Get-Cluster_Compare {
 	$ArrayTPS 		= @()	# Initialisation du tableau relatif au TPS
 	$ArrayLPages	= @()	# Initialisation du tableau relatif aux Large Pages
 	
+	LogTrace ("-- Appel de la fonction 'Get-ElapsedTime'")
 	Get-ElapsedTime
 	
 	### Valorisation des tableaux relatifs aux colonnes à vérifier
@@ -1009,19 +1294,30 @@ Function Get-Cluster_Compare {
 
 	# Boucle déterminant la première ligne Excel du cluster à la dernière
 	$ExcelLine = (2..($GetName.Row))
-	ForEach($l in $ExcelLine)	{
-		$ArrayVersion	+= $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayVersion).Text
-		$ArrayTimeZone 	+= $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayTimeZone).Text
-		$ArrayBaseline 	+= $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayBaseline).Text
-		$ArrayNTPd	 	+= $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayNTPd).Text
-		$ArrayCPUPolicy	+= $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayCPUPolicy).Text
-		$ArrayHA		+= $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayHA).Text
-		$ArrayHyperTh	+= $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayHyperTh).Text
-		$ArrayEVC		+= $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayEVC).Text
-		$ArrayAlarme	+= $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayAlarme).Text
-		$ArrayTPS 		+= $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayTPS).Text
-		$ArrayLPages 	+= $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayLPages).Text
+	LogTrace ("-- Traitement Excel de la ligne $ExcelLine_Start à la ligne $GetName.Row")
+	ForEach($L in $ExcelLine)	{
+		$ArrayVersion	+= $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayVersion).Text
+		$ArrayTimeZone 	+= $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayTimeZone).Text
+		$ArrayBaseline 	+= $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayBaseline).Text
+		$ArrayNTPd	 	+= $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayNTPd).Text
+		$ArrayCPUPolicy	+= $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayCPUPolicy).Text
+		$ArrayHA		+= $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayHA).Text
+		$ArrayHyperTh	+= $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayHyperTh).Text
+		$ArrayEVC		+= $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayEVC).Text
+		$ArrayAlarme	+= $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayAlarme).Text
+		$ArrayTPS 		+= $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayTPS).Text
+		$ArrayLPages 	+= $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayLPages).Text
+		
+		### Colorisation des cellules
+		$ExcelWorkSheet.Cells.Item($L, $Excel_Ref_Cluster).Interior.ColorIndex 			= $Excel_Couleur_Background
+		$ExcelWorkSheet.Cells.Item($L, $Excel_Ref_ENVironnement).Interior.ColorIndex	= $Excel_Couleur_Background
+		$ExcelWorkSheet.Cells.Item($L, $Excel_Ref_ArraySAN).Interior.ColorIndex			= $Excel_Couleur_Background
+		$ExcelWorkSheet.Cells.Item($L, $Excel_Ref_ArrayLUN).Interior.ColorIndex			= $Excel_Couleur_Background
+		$ExcelWorkSheet.Cells.Item($L, $Excel_Ref_ArrayVLAN).Interior.ColorIndex		= $Excel_Couleur_Background
+		$ExcelWorkSheet.Cells.Item($L, $Excel_Ref_ArrayLAN).Interior.ColorIndex			= $Excel_Couleur_Background
 	}
+	
+	LogTrace ("-- Appel de la fonction 'Get-ElapsedTime'")
 	Get-ElapsedTime
 
 	### Détermination des valeurs de références (majoritaires)
@@ -1041,6 +1337,7 @@ Function Get-Cluster_Compare {
 	$Ref_ArrayTPS 		= ($ArrayTPS		| Group | ?{ $_.Count -gt ($Cluster_Counter/2) }).Values | Select -Last 1
 	$Ref_ArrayLPages	= ($ArrayLPages 	| Group | ?{ $_.Count -gt ($Cluster_Counter/2) }).Values | Select -Last 1
 	
+	LogTrace ("-- Appel de la fonction 'Get-ElapsedTime'")
 	Get-ElapsedTime
 	
 	### Vérification des données par rapport aux valeurs majoritaires
@@ -1049,70 +1346,102 @@ Function Get-Cluster_Compare {
 	$ElapsedTime_Start = (Get-Date)
 	
 	# Boucle déterminant la première ligne Excel du cluster à la dernière
-	$ExcelLine = (2..($GetName.Row))
-	ForEach($l in $ExcelLine)	{
-		$Global:Cluster_NotCompliant_Item = 0
+	$Global:Cluster_NotCompliant_Item = 0
+	$Global:Cluster_Percent_NotCompliant_AVE = 0
 		
-		If ($ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayVersion).Text -ne $Ref_ArrayVersion) 	{ $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_Conformite_Details)	= $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_Conformite_Details).Text + "[≠ Version/Ensemble]" + $vbcrlf; $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayVersion).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayVersion).Font.Bold = $True; $Cluster_NotCompliant_Item += 1 } 		Else { $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayVersion).Font.ColorIndex = 1; $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayVersion).Font.Bold = $False }
-		If ($ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayTimeZone).Text -ne $Ref_ArrayTimeZone) 	{ $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_Conformite_Details)	= $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_Conformite_Details).Text + "[≠ TimeZone/Ensemble]" + $vbcrlf; $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayTimeZone).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayTimeZone).Font.Bold = $True; $Cluster_NotCompliant_Item += 1 } 		Else { $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayTimeZone).Font.ColorIndex = 1; $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayTimeZone).Font.Bold = $False }
-		If ($ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayBaseline).Text -ne $Ref_ArrayBaseline) 	{ $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_Conformite_Details)	= $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_Conformite_Details).Text + "[≠ Baseline/Ensemble]" + $vbcrlf; $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayBaseline).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayBaseline).Font.Bold = $True; $Cluster_NotCompliant_Item += 1 } 		Else { $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayBaseline).Font.ColorIndex = 1; $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayBaseline).Font.Bold = $False }
-		If ($ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayNTPd).Text -ne $Ref_ArrayNTPd) 			{ $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_Conformite_Details)	= $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_Conformite_Details).Text + "[≠ NTP démon/Ensemble]" + $vbcrlf; $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayNTPd).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayNTPd).Font.Bold = $True; $Cluster_NotCompliant_Item += 1 } 			Else { $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayNTPd).Font.ColorIndex = 1; $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayNTPd).Font.Bold = $False }
-		If ($ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayCPUPolicy).Text -ne $Ref_ArrayCPUPolicy) { $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_Conformite_Details)	= $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_Conformite_Details).Text + "[≠ CPU Policy/Ensemble]" + $vbcrlf; $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayCPUPolicy).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayCPUPolicy).Font.Bold = $True; $Cluster_NotCompliant_Item += 1 }	Else { $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayCPUPolicy).Font.ColorIndex = 1; $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayCPUPolicy).Font.Bold = $False }
-		If ($ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayHA).Text -ne $Ref_ArrayHA) 				{ $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_Conformite_Details)	= $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_Conformite_Details).Text + "[≠ HA/Ensemble]" + $vbcrlf; $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayHA).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayHA).Font.Bold = $True; $Cluster_NotCompliant_Item += 1 } 						Else { $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayHA).Font.ColorIndex = 1; $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayHA).Font.Bold = $False }
-		If ($ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayHyperTh).Text -ne $Ref_ArrayHyperTh) 	{ $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_Conformite_Details)	= $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_Conformite_Details).Text + "[≠ HyperThreading/Ensemble]" + $vbcrlf; $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayHyperTh).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayHyperTh).Font.Bold = $True; $Cluster_NotCompliant_Item += 1 } 	Else { $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayHyperTh).Font.ColorIndex = 1; $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayHyperTh).Font.Bold = $False }
-		If ($ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayEVC).Text -ne $Ref_ArrayEVC) 			{ $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_Conformite_Details)	= $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_Conformite_Details).Text + "[≠ EVC/Ensemble]" + $vbcrlf; $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayEVC).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayEVC).Font.Bold = $True; $Cluster_NotCompliant_Item += 1 } 					Else { $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayEVC).Font.ColorIndex = 1; $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayEVC).Font.Bold = $False }
-		If ($ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayAlarme).Text -ne $Ref_ArrayAlarme)		{ $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_Conformite_Details)	= $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_Conformite_Details).Text + "[≠ Alarmes/Ensemble]" + $vbcrlf; $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayAlarme).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayAlarme).Font.Bold = $True; $Cluster_NotCompliant_Item += 1 } 			Else { $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayAlarme).Font.ColorIndex = 1; $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayAlarme).Font.Bold = $False }
-		If ($ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayTPS).Text -ne $Ref_ArrayTPS) 			{ $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_Conformite_Details)	= $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_Conformite_Details).Text + "[≠ TPS/Ensemble]" + $vbcrlf; $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayTPS).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayTPS).Font.Bold = $True; $Cluster_NotCompliant_Item += 1 } 					Else { $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayTPS).Font.ColorIndex = 1; $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayTPS).Font.Bold = $False }
-		If ($ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayLPages).Text -ne $Ref_ArrayLPages) 		{ $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_Conformite_Details)	= $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_Conformite_Details).Text + "[≠ Large Pages/Ensemble]" + $vbcrlf; $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayLPages).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayLPages).Font.Bold = $True; $Cluster_NotCompliant_Item += 1 } 		Else { $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayLPages).Font.ColorIndex = 1; $ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_ArrayLPages).Font.Bold = $False }
+	$ExcelLine = (2..($GetName.Row))
+	LogTrace ("-- Traitement Excel de la ligne $ExcelLine_Start à la ligne $GetName.Row")
+	ForEach($L in $ExcelLine)	{
+		$Cluster_Percent_NotCompliant = 0
+		
+		If ($ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayVersion).Text -ne $Ref_ArrayVersion) 	{ $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_Conformite_Details)	= $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_Conformite_Details).Text + "[! Version/Ensemble]" + $VBCrLF; $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayVersion).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayVersion).Font.Bold = $True; $Cluster_NotCompliant_Item += 1; $Cluster_Percent_NotCompliant += 1 } 			Else { $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayVersion).Font.ColorIndex = 1; $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayVersion).Font.Bold = $False }
+		If ($ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayTimeZone).Text -ne $Ref_ArrayTimeZone) 	{ $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_Conformite_Details)	= $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_Conformite_Details).Text + "[! TimeZone/Ensemble]" + $VBCrLF; $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayTimeZone).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayTimeZone).Font.Bold = $True; $Cluster_NotCompliant_Item += 1; $Cluster_Percent_NotCompliant += 1 } 		Else { $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayTimeZone).Font.ColorIndex = 1; $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayTimeZone).Font.Bold = $False }
+		If ($ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayBaseline).Text -ne $Ref_ArrayBaseline) 	{ $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_Conformite_Details)	= $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_Conformite_Details).Text + "[! Baseline/Ensemble]" + $VBCrLF; $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayBaseline).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayBaseline).Font.Bold = $True; $Cluster_NotCompliant_Item += 1; $Cluster_Percent_NotCompliant += 1 } 		Else { $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayBaseline).Font.ColorIndex = 1; $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayBaseline).Font.Bold = $False }
+		If ($ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayNTPd).Text -ne $Ref_ArrayNTPd) 			{ $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_Conformite_Details)	= $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_Conformite_Details).Text + "[! NTP démon/Ensemble]" + $VBCrLF; $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayNTPd).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayNTPd).Font.Bold = $True; $Cluster_NotCompliant_Item += 1; $Cluster_Percent_NotCompliant += 1 } 				Else { $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayNTPd).Font.ColorIndex = 1; $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayNTPd).Font.Bold = $False }
+		If ($ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayCPUPolicy).Text -ne $Ref_ArrayCPUPolicy) { $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_Conformite_Details)	= $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_Conformite_Details).Text + "[! CPU Policy/Ensemble]" + $VBCrLF; $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayCPUPolicy).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayCPUPolicy).Font.Bold = $True; $Cluster_NotCompliant_Item += 1; $Cluster_Percent_NotCompliant += 1 }	Else { $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayCPUPolicy).Font.ColorIndex = 1; $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayCPUPolicy).Font.Bold = $False }
+		If ($ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayHA).Text -ne $Ref_ArrayHA) 				{ $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_Conformite_Details)	= $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_Conformite_Details).Text + "[! HA/Ensemble]" + $VBCrLF; $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayHA).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayHA).Font.Bold = $True; $Cluster_NotCompliant_Item += 1; $Cluster_Percent_NotCompliant += 1 } 							Else { $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayHA).Font.ColorIndex = 1; $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayHA).Font.Bold = $False }
+		If ($ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayHyperTh).Text -ne $Ref_ArrayHyperTh) 	{ $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_Conformite_Details)	= $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_Conformite_Details).Text + "[! HyperThreading/Ensemble]" + $VBCrLF; $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayHyperTh).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayHyperTh).Font.Bold = $True; $Cluster_NotCompliant_Item += 1; $Cluster_Percent_NotCompliant += 1 } 	Else { $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayHyperTh).Font.ColorIndex = 1; $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayHyperTh).Font.Bold = $False }
+		If ($ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayEVC).Text -ne $Ref_ArrayEVC) 			{ $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_Conformite_Details)	= $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_Conformite_Details).Text + "[! EVC/Ensemble]" + $VBCrLF; $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayEVC).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayEVC).Font.Bold = $True; $Cluster_NotCompliant_Item += 1; $Cluster_Percent_NotCompliant += 1 } 						Else { $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayEVC).Font.ColorIndex = 1; $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayEVC).Font.Bold = $False }
+		If ($ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayAlarme).Text -ne $Ref_ArrayAlarme)		{ $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_Conformite_Details)	= $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_Conformite_Details).Text + "[! Alarmes/Ensemble]" + $VBCrLF; $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayAlarme).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayAlarme).Font.Bold = $True; $Cluster_NotCompliant_Item += 1; $Cluster_Percent_NotCompliant += 1 } 			Else { $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayAlarme).Font.ColorIndex = 1; $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayAlarme).Font.Bold = $False }
+		If ($ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayTPS).Text -ne $Ref_ArrayTPS) 			{ $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_Conformite_Details)	= $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_Conformite_Details).Text + "[! TPS/Ensemble]" + $VBCrLF; $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayTPS).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayTPS).Font.Bold = $True; $Cluster_NotCompliant_Item += 1; $Cluster_Percent_NotCompliant += 1 } 						Else { $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayTPS).Font.ColorIndex = 1; $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayTPS).Font.Bold = $False }
+		If ($ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayLPages).Text -ne $Ref_ArrayLPages) 		{ $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_Conformite_Details)	= $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_Conformite_Details).Text + "[! Large Pages/Ensemble]" + $VBCrLF; $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayLPages).Font.ColorIndex = $Excel_Couleur_Error; $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayLPages).Font.Bold = $True; $Cluster_NotCompliant_Item += 1; $Cluster_Percent_NotCompliant += 1 } 		Else { $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayLPages).Font.ColorIndex = 1; $ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_ArrayLPages).Font.Bold = $False }
+	
+		### Inscription du pourcentage de conformité
+		$ExcelWorkSheet.Cells.Item($L, $Excel_Ref_Conformite_Globale)= "[" + [math]::round((100 - (($Cluster_Percent_NotCompliant / $Cluster_Item_CheckType) * 100)), 0) + "% conforme]"
+		$Cluster_Percent_NotCompliant_AVE = [math]::round(($Cluster_Percent_NotCompliant_AVE + (100 - (($Cluster_Percent_NotCompliant / $Cluster_Item_CheckType) * 100))) / 2, 2)
 	
 		### Mise à jour de la colonne TimeStamp
-		$ExcelWorkSheet_Ref.Cells.Item($l, $Excel_Ref_TimeStamp) = Get-Date -UFormat "%Y/%m/%d %H:%M:%S"
+		$ExcelWorkSheet_Ref.Cells.Item($L, $Excel_Ref_TimeStamp) = Get-Date -UFormat "%Y/%m/%d %H:%M:%S"
+		
+		### Valorisation des compteurs totaux
+		If ($Excel_Ref_Conformite_Globale -eq "100%") {
+			$Cluster_NotCompliant += 1 }
+		Else {
+			$Cluster_NotCompliant += 1
+		}
 	}
 	
+	LogTrace ("-- Appel de la fonction 'Get-ElapsedTime'")
 	Get-ElapsedTime
 	
 	Write-Host "Vérification de l'homogénéité des clusters par ENV... (Terminée)`r`n"
-	Write-Host "En résumé: $Cluster_NotCompliant_Item différence(s)`r`n" -ForegroundColor White
+	Write-Host "--- En résumé: ---`r`n * Différence(s): $Cluster_NotCompliant_Item`r`n * Taux moyen de conformité: $Cluster_Percent_NotCompliant_AVE%`r`n" -ForegroundColor White
 	LogTrace ("Vérification de l'homogénéité des clusters par ENV... (Terminée)")
-	Logtrace ("En résumé: $Cluster_NotCompliant_Item différence(s)`r`n")
-	
+	Logtrace ("--- En résumé: ---`r`n * Différence(s): $Cluster_NotCompliant_Item`r`n * Taux moyen de conformité: $Cluster_Percent_NotCompliant_AVE%`r`n")
+
 	$ExcelWorkBook_Ref.Save()
+}
+
+
+### Fonction chargée de la conversion du format XLS en CSV
+Function ConvertXLS2CSV {
+
+	Write-Host "Conversion du fichier XLS en CSV...`t`t" -NoNewLine
+	$ExcelWorkBook.SaveAs($File_CSV, 6)
+	Write-Host "Terminé" -ForegroundColor Black -BackgroundColor White
+	LogTrace ("Conversion du fichier XLS en CSV...`t`tTerminé")
 }
 
 
 ### Fonction chargée de l'envoi de messages électroniques (En fin de traitement)
 Function Send_Mail {
-	$Sender1 = "Christophe.VIDEAU-ext@ca-ts.fr"
-	$Sender2 = #"MCO.Infra.OS.distribues@ca-ts.fr"
-	$From = "[ESXi] compliance check <ESXiCompliance.report@ca-ts.fr>"
-	$Subject = "[Conformit&eacute; ESXi] Compte-rendu operationnel {Conformit&eacute; infrastructures VMware}"
-	If ($BodyMail_Error -ne $NULL) { $Body = "Bonjour,<BR><BR>Vous trouverez en pi&egrave;ce jointe le fichier LOG et la synth&egrave;se technique de l&rsquo;op&eacute;ration.<BR><BR><U>En bref:</U><BR>Mode: " + $Mode + "<BR>Nombre d'ESXi conformes:<B><I> " + $ESX_Compliant + "</I></B><BR>Nombre d'ESXi non conforme(s):<B><I> " + $ESX_NotCompliant + " (" + $ESX_NotCompliant_Item + " diff&eacute;rences depuis le début)</I><BR>Nombre de clusters non conforme(s):<B><I> " + $Cluster_NotCompliant + " (" + $Cluster_NotCompliant_Item + " diff&eacute;rences)</I></B><BR>Dur&eacute;e du traitement: <I>" + $($Min) + "min. " + $($Sec) + "sec.</I><BR><BR>----------------------" + $BodyMail_Error + "<BR>----------------------<BR><BR><BR>Cordialement.<BR>L'&eacute;quipe d&eacute;veloppement (Contact: Hugues de TERSSAC)<BR><BR>Ce message a &eacute;t&eacute; envoy&eacute; par un automate, ne pas y r&eacute;pondre." }
-	Else { $Body = "Bonjour,<BR><BR>Vous trouverez en pi&egrave;ce jointe le fichier LOG et la synth&egrave;se technique de l&rsquo;op&eacute;ration.<BR><BR><U>En bref:</U><BR>Mode: " + $Mode + "<BR>Nombre d'ESXi conformes:<B><I> " + $ESX_Compliant + "</I></B><BR>Nombre d'ESXi non conforme(s):<B><I> " + $ESX_NotCompliant + " (" + $ESX_NotCompliant_Item + " diff&eacute;rences depuis le début)</I></B><BR>Nombre de clusters non conforme(s):<B><I> " + $Cluster_NotCompliant + " (" + $Cluster_NotCompliant_Item + " diff&eacute;rences)</I><BR>Dur&eacute;e du traitement: <I>" + $($Min) + "min. " + $($Sec) + "sec.</I><BR><BR>Cordialement.<BR>L'&eacute;quipe d&eacute;veloppement (Contact: Christophe VIDEAU)<BR><BR>Ce message a &eacute;t&eacute; envoy&eacute; par un automate, ne pas y r&eacute;pondre." }
-	$Attachments = $FicLog, $FicRes
-	$SMTP = "muz10-e1smtp-IN-DC-INT.zres.ztech"
-	Send-MailMessage -To $Sender1, $Sender2 -From $From -Subject $Subject -Body $Body -Attachments $Attachments -SmtpServer $SMTP -Priority High -BodyAsHTML
+
+	$Sender1 		= "Christophe.VIDEAU-ext@ca-ts.fr"
+	$Sender2 		= #"MCO.Infra.OS.distribues@ca-ts.fr"
+	$Sender3 		= #"MCO.Infra.OS.distribues@ca-ts.fr"
+	$Sender4 		= #"MCO.Infra.OS.distribues@ca-ts.fr"
+	$From 			= "[ESXi] compliance check <ESXiCompliance.report@ca-ts.fr>"
+	$Subject 		= "[Conformit&eacute; ESXi] Compte-rendu operationnel {Conformit&eacute; infrastructures VMware}"
+	$Body 			= "Bonjour,<BR><BR>Vous trouverez en pi&egrave;ce jointe le fichier LOG et la synth&egrave;se technique de l&rsquo;op&eacute;ration.<BR><BR><U>En bref:</U><BR>Mode: " + $Mode + "<BR>Nombre d'ESXi conformes:<B><I> " + $ESX_Compliant + "</I></B><BR>Nombre d'ESXi non conforme(s):<B><I> " + $ESX_NotCompliant + " (" + $ESX_NotCompliant_Item + " diff&eacute;rences depuis le début)</I></B><BR>Nombre de clusters non conforme(s):<B><I> " + $Cluster_NotCompliant + " (" + $Cluster_NotCompliant_Item + " diff&eacute;rences)</I></B><BR>Dur&eacute;e du traitement: <I>" + $($Min) + "min. " + $($Sec) + "sec.</I><BR><BR>Cordialement.<BR>L'&eacute;quipe d&eacute;veloppement (Contact: Christophe VIDEAU)<BR><BR>Ce message a &eacute;t&eacute; envoy&eacute; par un automate, ne pas y r&eacute;pondre."
+	If ($Mode_Var -eq 1) {
+		$Attachments 	= $FicLog, $FicRes, $File_CSV }
+	Else {
+		$Attachments 	= $FicLog, $FicRes }
+	$SMTP			 = "muz10-e1smtp-IN-DC-INT.zres.ztech"
+	Send-MailMessage -To $Sender1, $Sender2, $Sender3, $Sender4 -From $From -Subject $Subject -Body $Body -Attachments $Attachments -SmtpServer $SMTP -Priority High -BodyAsHTML
 }
 
 
-### >>>>>>>>>> SOUS-FONCTIONS <<<<<<<<<<<<
+### Fonction chargée de journaliser les actions du script dans un fichier LOG
 Function LogTrace ($Message){
-	$Message = (Get-Date -format G) + " " + $Message
-	Out-File -FilePath $FicLog -Encoding UTF8 -InputObject $Message -Append }
+	If ($Mode_Debug -eq 1) {
+		$Message = (Get-Date -format G) + " " + $Message + " [Ligne de code:" + $Myinvocation.ScriptlineNumber + "]" }
+	Else {
+		$Message = (Get-Date -format G) + " " + $Message }
+	
+	Out-File -FilePath $FicLog -Encoding UTF8 -InputObject $Message -Append
+}
 
-### >>>>>>> DEBUT DU SCRIPT <<<<<<<<<<<
-#$ErrorActionPreference = "SilentlyContinue"
-$ScriptName	= [io.path]::GetFileNameWithoutExtension($MyInvocation.MyCommand.Definition)
-$vbcrlf		= "`r`n"
-$l			= 0
-$dat		= Get-Date -UFormat "%Y_%m_%d_%H_%M_%S"
+### Test de l'existence d'un processus en cours
+If (Test-Path ($RepLog + $ScriptName + $File_PROCESS_LOCK)) {
+	[System.Windows.Forms.MessageBox]::Show("Attention: Le script est déjà en cours d'exécution dans un autre processus. Attendre la fin de ce processus avant de l'exécuter de nouveau. Fin du script...", "Avertissement" , 0, 48)
+	Exit
+}
 
 ### Création du répertoire de LOG si besoin
-$PathScript = ($myinvocation.MyCommand.Definition | Split-Path -parent) + "\"
-$RepLog     = $PathScript + "LOG"
 If (!(Test-Path $RepLog)) { New-Item -Path $PathScript -ItemType Directory -Name "LOG"}
-$RepLog     = $RepLog + "\"
-If ($args[1]) { $FicLog     = $RepLog + $ScriptName + "_" + $dat + "_ONE_SHOT.log" } Else { $FicLog     = $RepLog + $ScriptName + "_REF.log" }
-$LineSep    = "=" * 70
+If ($args[1]) { $FicLog = $RepLog + $ScriptName + "_" + $Format_DATE + $File_LOG_ONESHOT } Else { $FicLog = $RepLog + $ScriptName + $File_LOG_DISCOVER }
+$LineSep = "=" * 70
 
 ### Si le fichier LOG n'existe pas on le crée à vide
 $Line = ">> DEBUT script de contrôle ESXi <<"
@@ -1120,6 +1449,11 @@ If (!(Test-Path $FicLog)) {
 	$Line = (Get-Date -format G) + " " + $Line
 	Out-File -FilePath $FicLog -Encoding UTF8 -InputObject $Line }
 Else { LogTrace ($Line) }
+
+### Bouchon bordelais pour tests
+#[System.Windows.Forms.MessageBox]::Show("Attention: Mode DEBUG activé...", "Avertissement" , 0, 48)
+#$args = @()
+#$args = "SWMUZV1VCSZD.zres.ztech", "AUCUN", "AUCUN", "CL_MU_HDI_Z11,CL_MU_HDM_Z11,CT_MU_SMH_Z18", "TOUS"
 
 ### Test du contenu des paramètres de la ligne de commandes
 If ($args[1]) {
@@ -1140,25 +1474,28 @@ If ($args[1]) {
 	Add-Type -AssemblyName Microsoft.Office.Interop.Excel
 	$Excel = New-Object -ComObject Excel.Application
 	
-	$FicRes		= $RepLog + $ScriptName + "_" + $dat + "_ONE_SHOT.xlsx"
-	$FicRes_Ref	= $RepLog + $ScriptName + "_REF.xlsx"
+	$FicRes		= $RepLog + $ScriptName + "_" + $Format_DATE + $File_XLSX_ONESHOT
+	$FicRes_Ref	= $RepLog + $ScriptName + $File_XLSX_DISCOVER
 	
-	If (Test-Path ($RepLog + $ScriptName + "_REF.xlsx")) {
-		Write-Host "Le fichier Excel de référence '$($RepLog + $ScriptName + "_REF.xlsx")' est disponible" -ForegroundColor Green
+	LogTrace ("Création du fichier LOCK")
+	New-Item ($RepLog + $ScriptName + $File_PROCESS_LOCK) -ItemType File | Out-Null
+	
+	If (Test-Path ($RepLog + $ScriptName + $File_XLSX_DISCOVER)) {
+		Write-Host "Le fichier Excel de référence '$($RepLog + $ScriptName + $File_XLSX_DISCOVER)' est disponible" -ForegroundColor Green
 		Write-Host "Comparaison possible en fin de traitement de chacun des clusters..." -ForegroundColor White
-		LogTrace ("Le fichier Excel de référence '$($RepLog + $ScriptName + "_REF.xlsx")' est disponible. Comparaison possible en fin de traitement de chacun des clusters...")
-		$ExcelWorkBook_Ref	= $Excel.WorkBooks.Open($FicRes_Ref)	# Ouverture du fichier *_REF.xlsx
-		$ExcelWorkSheet_Ref	= $Excel.WorkSheets.item(2)				# Définition de la feuille Excel par défaut du fichier *_REF.xlsx
+		LogTrace ("Le fichier Excel de référence '$($RepLog + $ScriptName + $File_XLSX_DISCOVER)' est disponible. Comparaison possible en fin de traitement de chacun des clusters...")
+		$ExcelWorkBook_Ref	= $Excel.WorkBooks.Open($FicRes_Ref)	# Ouverture du fichier _REF
+		$ExcelWorkSheet_Ref	= $Excel.WorkSheets.item(2)				# Définition de la feuille Excel par défaut du fichier _REF
 	} Else {
-		Write-Host "INFO: Le fichier Excel de référence '$RepLog + $ScriptName + "_REF.xlsx"' est indisponible.`r`nComparaison impossible en fin de traitement de chacun des clusters..." -ForegroundColor Red
-		LogTrace ("INFO: Le fichier Excel de référence '$($RepLog + $ScriptName + "_REF.xlsx")' est indisponible.`r`nComparaison impossible en fin de traitement de chacun des clusters...") }
+		Write-Host "INFO: Le fichier Excel de référence '$($RepLog + $ScriptName + $File_XLSX_DISCOVER)' est indisponible.`r`nComparaison impossible en fin de traitement de chacun des clusters..." -ForegroundColor Red
+		LogTrace ("INFO: Le fichier Excel de référence '$($RepLog + $ScriptName + $File_XLSX_DISCOVER)' est indisponible.`r`nComparaison impossible en fin de traitement de chacun des clusters...") }
 	
-	Copy-Item ($PathScript + "ESX_Health_Modele.xlsx") -Destination ($RepLog + $ScriptName + "_" + $dat + "_ONE_SHOT.xlsx")
+	Copy-Item ($PathScript + $File_TEMPLATE) -Destination ($RepLog + $ScriptName + "_" + $Format_DATE + $File_XLSX_ONESHOT)
 	
 	### Définition du fichier Excel
-	$ExcelWorkBook		= $Excel.WorkBooks.Open($FicRes)		# Ouverture du fichier *_[ONE SHOT].xlsx
-	$ExcelWorkSheet		= $Excel.WorkSheets.item(1)				# Définition de la feuille Excel par défaut du fichier *_[ONE SHOT].xlsx
-	$Excel.WorkSheets.item(2).Delete()							# Suppression de la 2ème feuille (inutile) du fichier *_[ONE SHOT].xlsx
+	$ExcelWorkBook		= $Excel.WorkBooks.Open($FicRes)		# Ouverture du fichier [ONE SHOT]
+	$ExcelWorkSheet		= $Excel.WorkSheets.item(1)				# Définition de la feuille Excel par défaut du fichier [ONE SHOT]
+	$Excel.WorkSheets.item(2).Delete()							# Suppression de la 2ème feuille (inutile) du fichier [ONE SHOT]
 	
 	$ExcelWorkSheet.Activate()
 	$Excel.Visible		= $False
@@ -1189,13 +1526,14 @@ If ($args[1]) {
 	If ($Cluster_Inc -ne "TOUS" )								{ $Array_Cluster_Inc 	= $Cluster_Inc.split(","); If ($Cluster_Inc.Contains(",")) { $Array_Cluster_Inc_Counter = ($Cluster_Inc.split(",").GetUpperBound(0) + 1) } Else { $Array_Cluster_Inc_Counter = 1 } }
 	If ($ESX_Inc -ne "TOUS" )									{ $Array_ESX_Inc 		= $ESX_Inc.split(","); If ($ESX_Inc.Contains(",")) { $Array_ESX_Inc_Counter = ($ESX_Inc.split(",").GetUpperBound(0) + 1) } Else { $Array_ESX_Inc_Counter = 1 } }
 
-	LogTrace ("Mode 'Par vCenter avec filtrage'")
+	LogTrace ("$Mode")
+	LogTrace ("Mode DEBUG (0:Désactivé - 1:Activé) .. : $Mode_Debug")
 	LogTrace ("Fichier liste des vCenter à traiter .. : $vCenters")
 	Logtrace ("Cluster à exclure .................... : $Cluster_Exc")
 	Logtrace ("ESXi à exclure ....................... : $ESX_Exc")
-	Logtrace ("Cluster à prendre en compte .......... : $Cluster_Inc")
-	Logtrace ("ESXi à prendre en compte ............. : $ESX_Inc")
-	LogTrace ($LineSep + $vbcrlf)
+	Logtrace ("Cluster à prendre en compte .......... : $Cluster_Inc (" + $Array_Cluster_Inc_Counter + ")")
+	Logtrace ("ESXi à prendre en compte ............. : $ESX_Inc (" + $Array_ESX_Inc_Counter + ")")
+	LogTrace ($LineSep + $VBCrLF)
 	$TabVcc = $vCenters.split(",")
 } Else {
 	$Mode = "Mode 'Par vCenter sans aucun filtrage'"
@@ -1203,24 +1541,29 @@ If ($args[1]) {
 	Write-Host "$Mode [ID $Mode_Var]" -ForegroundColor Red -BackgroundColor White
 	
 	### Test de l'existence du fichier Excel de référence
-	If (Test-Path ($RepLog + $ScriptName + "_REF.xlsx")) {
-		$Reponse = [System.Windows.Forms.MessageBox]::Show("Attention: le fichier '$($RepLog + $ScriptName + "_REF.xlsx")' existe déjà, voulez-vous le remplacer ? ", "Confirmation" , 4, 32)
-		If (($Reponse -eq "Yes") -or ($Reponse -eq "Oui")) {
-			Move-Item ($RepLog + $ScriptName + "_REF.xlsx") ($RepLog + $ScriptName + "_REF_(BCKP_"+ $dat + ").xlsx")	# Sauvegarde du précédent fichier _REF.xlsx
-			Move-Item ($RepLog + $ScriptName + "_REF.log") ($RepLog + $ScriptName + "_REF_(BCKP_"+ $dat + ").log")		# Sauvegarde du précédent fichier _REF.log
-			Copy-Item ($PathScript + "ESX_Health_Modele.xlsx") -Destination ($RepLog + $ScriptName + "_REF-work.xlsx")	# Copie du modèle pour modification par le script
-			Write-Host "Le fichier '$($RepLog + $ScriptName + "_REF.xlsx")' (et son fichier LOG) a été sauvegardé" -ForegroundColor Red
-			LogTrace ("Le fichier '$($RepLog + $ScriptName + "_REF.xlsx")' (et son fichier LOG) a été sauvegardé") }
+	If (Test-Path ($RepLog + $ScriptName + $File_XLSX_DISCOVER)) {
+		$Global:Reponse = [System.Windows.Forms.MessageBox]::Show("Attention: le fichier '$($RepLog + $File_XLSX_DISCOVER)' existe déjà, voulez-vous le remplacer en fin d'exécution ? ", "Confirmation" , 4, 32)
+		If (($Global:Reponse -eq "Yes") -or ($Global:Reponse -eq "Oui")) {
+			LogTrace ("Le fichier '$($RepLog + $ScriptName + $File_XLSX_DISCOVER)' sera écrasé en fin d'exécution...")
+			If (Test-Path ($PathScript + $File_TEMPLATE)) {
+				Copy-Item ($PathScript + $File_TEMPLATE) -Destination ($RepLog + $ScriptName + $File_XLSX_DISCOVER_work) }
+			Else {
+				[System.Windows.Forms.MessageBox]::Show("Attention: Le fichier modèle '$File_TEMPLATE' n'existe pas. Fin du script...", "Avertissement" , 0, 48)
+				Exit }
+		}
 		Else	{
-			Write-Host "Le fichier '$($RepLog + $ScriptName + "_REF.xlsx")' n'a pas été écrasé" -ForegroundColor Red
-			LogTrace ("Le fichier '$($RepLog + $ScriptName + "_REF.xlsx")' n'a pas été écrasé")
+			Write-Host "Le fichier '$($RepLog + $ScriptName + $File_XLSX_DISCOVER)' n'a pas été écrasé. Fin du script..." -ForegroundColor Red
+			LogTrace ("Le fichier '$($RepLog + $ScriptName + $File_XLSX_DISCOVER)' n'a pas été écrasé. Fin du script...")
 			LogTrace ("FIN du script")
 			Write-Host -NoNewLine "FIN du script. Appuyer sur une touche pour quitter...`r`n"
-			$NULL = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+			$Null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
 			Exit }
-	} Else { Copy-Item ($PathScript + "ESX_Health_Modele.xlsx") -Destination ($RepLog + $ScriptName + "_REF-work.xlsx") }	# Copie du modèle pour modification par le script
+	} Else { Copy-Item ($PathScript + $File_TEMPLATE) -Destination ($RepLog + $ScriptName + $File_XLSX_DISCOVER_work) }
 	
-	$FicRes = $RepLog + $ScriptName + "_REF-work.xlsx"
+	$FicRes = $RepLog + $ScriptName + $File_XLSX_DISCOVER_work
+	
+	LogTrace ("Création du fichier LOCK")
+	New-Item ($RepLog + $ScriptName + $File_PROCESS_LOCK) -ItemType File | Out-Null
 	
 	### Définition du fichier Excel
 	$Excel = New-Object -ComObject Excel.Application
@@ -1233,17 +1576,10 @@ If ($args[1]) {
 	$Global:vCenters = $args[0]		# Nom du vCenter
 	LogTrace ("Mode 'Par vCenter sans aucun filtrage'")
 	LogTrace ("Fichier liste des vCenter à traiter .. : $vCenters")
-	LogTrace ($LineSep + $vbcrlf)
+	LogTrace ($LineSep + $VBCrLF)
 	$TabVcc = $vCenters.split(",") }
 
-$user       = "CSP_SCRIPT_ADM"
-$fickey     = "D:\Scripts\Credentials\key.crd"
-$ficcred    = "D:\Scripts\Credentials\vmware_adm.crd"
-$key        = Get-content $fickey
-$pwd        = Get-Content $ficcred | ConvertTo-SecureString -key $key
-$Credential = New-Object System.Management.Automation.PSCredential $user, $pwd
-
-
+	
 ### Boucle de traitement des vCenters contenus dans les paramètres de la ligne de commandes
 ForEach ($vCenter in $TabVcc) {
 	LogTrace ("DEBUT du traitement VCENTER $vCenter")
@@ -1253,13 +1589,13 @@ ForEach ($vCenter in $TabVcc) {
 	
 	$rccnx = Connect-VIServer -Server $vCenter -Protocol https -Credential $Credential
 	$topCnxVcc = "0"
-	If ($rccnx -ne $NULL) { If ($rccnx.Isconnected) { $topCnxVcc = "1" } }
+	If ($rccnx -ne $Null) { If ($rccnx.Isconnected) { $topCnxVcc = "1" } }
 
 	If ($topCnxVcc -ne "1") { LogTrace ("ERREUR: Connexion KO au vCenter $vCenter - Arrêt du script")
 		Write-Host "ERREUR: Connexion KO au vCenter $vCenter - Arrêt du script" -ForegroundColor White -BackgroundColor Red	
 		$rc += 1
 		Exit $rc }
-	Else { LogTrace ("SUCCES: Connexion OK au vCenter $vCenter" + $vbcrlf)
+	Else { LogTrace ("SUCCES: Connexion OK au vCenter $vCenter" + $VBCrLF)
 		Write-Host "SUCCES: Connexion OK au vCenter $vCenter" -ForegroundColor Black -BackgroundColor Green }
 	
 	$Global:noDatacenter = 0
@@ -1268,12 +1604,14 @@ ForEach ($vCenter in $TabVcc) {
 	
 	### Boucle de traitement des Datacenter composant le vCenter
 	ForEach($DC in $oDatacenters){ $noDatacenter += 1
-		LogTrace ("Traitement DATACENTER $DC n°$noDatacenter sur $Datacenter_Counter" + $vbcrlf)
+		LogTrace ("Traitement DATACENTER $DC n°$noDatacenter sur $Datacenter_Counter" + $VBCrLF)
 		Write-Host "`r`nTraitement DATACENTER [#$noDatacenter/$Datacenter_Counter] " -NoNewLine
 		Write-Host "$DC... ".ToUpper() -ForegroundColor Yellow -NoNewLine
 		Write-Host "En cours" -ForegroundColor Green	
 
-		$Global:noCluster = 0
+		If ($Mode_Var -eq 1) {
+			$Global:noCluster = 0
+		}
 		$Global:oClusters = Get-Cluster -Location $DC | Sort Name
 		$Global:Cluster_Counter = $oClusters.Count
 
@@ -1287,23 +1625,30 @@ ForEach ($vCenter in $TabVcc) {
 					Write-Host " * Exclusion " -NoNewLine -ForegroundColor Red
 					Write-Host "du cluster " -NoNewLine
 					Write-Host "'$ClusterNom'..." -ForegroundColor DarkYellow
+					
 					Continue }
+					
 				If (($Array_Cluster_Inc.Length -ne 0) -and ($Array_Cluster_Inc -notContains $ClusterNom)) {
 					Logtrace (" * Cluster '$ClusterNom' absent des clusters à traiter...")
 					Write-Host " * Cluster " -NoNewLine
 					Write-Host "'$ClusterNom' " -NoNewLine -ForegroundColor DarkYellow
 					Write-Host "absent " -NoNewLine -ForegroundColor Red
 					Write-Host "des clusters à traiter..."
+					
 					Continue }
 			}
 
-			$noCluster += 1; $Cluster_ID += 1
+			$Cluster_ID += 1
+			$noCluster += 1
+			
 			### Exception de valorisation de la variable selon le mode
-			If ($Mode_Var -eq 1) {
+			If ($Mode_Var -eq 1) {	### Découverte complète ESXi
 				$Global:ExcelLine_Start += $ESX_Counter
+				LogTrace ("-- Valeur de la variable 'ExcelLine_Start'=$Global:ExcelLine_Start")
 			}
-			Else {
-				$Global:ExcelLine_Start += $no_inc_ESX
+			Else {					### Ciblage ESXi
+				$Global:ExcelLine_Start += $No_ESX
+				LogTrace ("-- Valeur de la variable 'ExcelLine_Start'=$Global:ExcelLine_Start")
 			}
 
 			LogTrace ("Traitement CLUSTER '$Cluster' n°$noCluster sur $Cluster_Counter {$Cluster_ID}")
@@ -1313,18 +1658,24 @@ ForEach ($vCenter in $TabVcc) {
 			Write-Host "En cours" -ForegroundColor Green
 
 			$Global:oESX = Get-vmHost -Location $Cluster
-			$Global:ESX_Counter = $oESX.Count
 			$Global:no_ESX = 0
+			
+			$Global:ESX_Counter = $oESX.Count
+			LogTrace ("-- Valeur de la variable 'ESX_Counter'=$Global:ESX_Counter")
 
 			### Boucle de traitement des ESXi composants le cluster dont ceux contenus dans les paramètres de la ligne de commandes
 			ForEach($ESX in Get-vmHost -Location $Cluster) {
 				If (($Mode_Var -eq 2) -and ($ESX_Inc -ne "TOUS")) {
 					$Global:ESX_Counter = $Array_ESX_Inc_Counter
+					LogTrace ("-- Valeur de la variable 'Array_ESX_Inc_Counter'=$Array_ESX_Inc_Counter")
 					If ($Array_ESX_Exc -Contains $ESX) {
 						Logtrace (" * Exclusion de l'ESXi '$ESX'...")
 						Write-Host " * Exclusion " -NoNewLine -ForegroundColor Red
-						Write-Host "de l'ESXi " -NoNewLine
+						Write-Host "de l'ESXi " -NoNewLines
 						Write-Host "'$ESX'..." -ForegroundColor DarkYellow
+						$No_ESX += 1		### Incrémentation de la valeur du n° d'ESXi
+						LogTrace ("-- Valeur de la variable 'no_ESX'=$No_ESX")
+						
 						Continue
 					}
 					If (($Array_ESX_Inc.Length -ne 0) -and ($Array_ESX_Inc -notContains $ESX)) {
@@ -1333,37 +1684,45 @@ ForEach ($vCenter in $TabVcc) {
 						Write-Host "'$ESX' " -NoNewLine -ForegroundColor DarkYellow
 						Write-Host "absent " -NoNewLine -ForegroundColor Red
 						Write-Host "des ESXi à traiter..."
+						$No_ESX += 1		### Incrémentation de la valeur du n° d'ESXi
+						LogTrace ("-- Valeur de la variable 'no_ESX'=$No_ESX")
+						
 						Continue
 					}
 				}
  
-				$no_ESX += 1; $no_inc_ESX += 1
+				$No_ESX += 1		### N° ESXi dans le cluster
+				LogTrace ("-- Valeur de la variable 'no_ESX'=$No_ESX")
+				
+				$No_INC_ESX += 1	### n° ESXi total (depuis le début de l'exécution du script)
+				LogTrace ("-- Valeur de la variable 'no_inc_ESX'=$No_INC_ESX")
 
 				$StartTime = Get-Date -Format HH:mm:ss
-				LogTrace ("Traitement ESXi '$ESX' n°$no_ESX sur $($ESX_Counter) {$no_inc_ESX}")
-				Write-Host "[$StartTime] Traitement ESXi [#$no_ESX/$($ESX_Counter)] " -NoNewLine
-				Write-Host "{$no_inc_ESX} " -ForegroundColor Red -NoNewLine
+				LogTrace ("Traitement ESXi '$ESX' n°$No_ESX sur $($ESX_Counter) {$No_INC_ESX}")
+				Write-Host "[$StartTime] Traitement ESXi [#$No_ESX/$($ESX_Counter)] " -NoNewLine
+				Write-Host "{$No_INC_ESX} " -ForegroundColor Red -NoNewLine
 				Write-Host "'$ESX'... ".ToUpper() -ForegroundColor Yellow -NoNewLine
 				Write-Host "En cours" -ForegroundColor Green
 
 				If ($ESX.PowerState -ne "PoweredOn") {
 					For ($i = 1; $i -le $Excel_Conformite_Details; $i++) {
-						$ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $i) = "NA"
-						$ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $i).Interior.ColorIndex = $Excel_Couleur_Background
+						$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $i) = "NA"
+						$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $i).Interior.ColorIndex = $Excel_Couleur_Background
 					}
-					$ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_Nom_ESX)			= $ESX.Name			# Ligne, Colonne
-					$ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_CONF_Statut_ESX) = "PoweredOff" 		# Ligne, Colonne
-					$ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_CONF_Datacenter)	= "$DC"				# Ligne, Colonne
-					$ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_CONF_Cluster)	= "$Cluster"		# Ligne, Colonne
-					$ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_CONF_vCenter)	= "$vCenter"		# Ligne, Colonne
+					$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_Nom_ESX)			= $ESX.Name			# Ligne, Colonne
+					$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_CONF_Statut_ESX) = "PoweredOff" 		# Ligne, Colonne
+					$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_CONF_Datacenter)	= "$DC"				# Ligne, Colonne
+					$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_CONF_Cluster)	= "$Cluster"		# Ligne, Colonne
+					$ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_CONF_vCenter)	= "$vCenter"		# Ligne, Colonne
 
 					Switch -Wildcard ($vCenter)	{
-						"*VCSZ*" { $ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_ENVironnement)	= "PRODUCTION" }
-						"*VCSY*" { $ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_ENVironnement)	= "NON PRODUCTION" }
-						"*VCSQ*" { $ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_ENVironnement)	= "CLOUD" }
-						"*VCSZY*" { $ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_ENVironnement) 	= "SITES ADMINISTRATIFS" }
-						"*VCSSA*" { $ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_ENVironnement)	= "BAC A SABLE" }
-						Default	{ $ExcelWorkSheet.Cells.Item($no_inc_ESX + 1, $Excel_ENVironnement)		= "NA" }
+						"*VCSZ*" { $ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_ENVironnement)	= "PRODUCTION" }
+						"*VCSY*" { $ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_ENVironnement)	= "NON PRODUCTION" }
+						"*VCSQ*" { $ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_ENVironnement)	= "CLOUD" }
+						"*VCSZY*" { $ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_ENVironnement) 	= "SITES ADMINISTRATIFS" }
+						"*VCSSA*" { $ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_ENVironnement)	= "BAC A SABLE" }
+						"*VCS00*" { $ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_ENVironnement)	= "PVM" }
+						Default	{ $ExcelWorkSheet.Cells.Item($No_INC_ESX + 1, $Excel_ENVironnement)		= "NA" }
 					}
 
 					$EndTime = Get-Date -Format HH:mm:ss
@@ -1371,14 +1730,15 @@ ForEach ($vCenter in $TabVcc) {
 					### Enregistrement des modifications Excel
 					$ExcelWorkBook.Save()
 					
-					LogTrace ("MISE A JOUR des données pour l'ESXi '$ESX'. Zone [L$ExcelLine_Start..$($ExcelLine_Start + $ESX_Counter - 1) *L$($no_inc_ESX + 1)*]..." + $vbcrlf)
+					LogTrace ("MISE A JOUR des données pour l'ESXi '$ESX'. Zone [L$ExcelLine_Start..$($ExcelLine_Start + $ESX_Counter - 1) *L$($No_INC_ESX + 1)*]..." + $VBCrLF)
 					Write-Host "[$EndTime] Mise à jour des données Excel " -NoNewLine
-					Write-Host "Zone [L$ExcelLine_Start..$($ExcelLine_Start + $ESX_Counter - 1) *L$($no_inc_ESX + 1)*]... "  -ForegroundColor Yellow -NoNewLine
+					Write-Host "Zone [L$ExcelLine_Start..$($ExcelLine_Start + $ESX_Counter - 1) *L$($No_INC_ESX + 1)*]... " -ForegroundColor Yellow -NoNewLine
 					Write-Host "Terminée`r`n" -ForegroundColor Black -BackgroundColor White
 
 					# Dans le cas d'une découverte complète du périmètre
 					If ($Mode_Var -eq 1) {
-						If ($no_ESX -eq $($oESX.Count)) {
+						If ($No_ESX -eq $($oESX.Count)) {
+							LogTrace ("-- Appel de la fonction 'Get-ESX_Compare_Full'")
 							Get-ESX_Compare_Full
 							$ExcelWorkBook.Save()
 						}
@@ -1386,17 +1746,21 @@ ForEach ($vCenter in $TabVcc) {
 					
 					### Sélection de la fonction selon le mode de départ
 					If ($Mode_Var -eq 2) {
-						If (Test-Path ($RepLog + $ScriptName + "_REF.xlsx")) {	# Dans le cas d'une vérification de conformité unitaire si le fichier Excel de référence existe
-							If ($no_ESX -eq $ESX_Counter) {
+						If (Test-Path ($RepLog + $ScriptName + $File_XLSX_DISCOVER)) {	# Dans le cas d'une vérification de conformité unitaire si le fichier Excel de référence existe
+							If ($No_ESX -eq $ESX_Counter) {
+								LogTrace ("-- Appel de la fonction 'Get-ESX_Compare_CiblesvsReference'")
 								Get-ESX_Compare_CiblesvsReference
 								$ExcelWorkBook.Save()
+								
 								Break
 							}
 						}
 						Else {	# Dans le cas d'une vérification de conformité unitaire si le fichier Excel de référence n'existe pas
-							If ($no_ESX -eq $ESX_Counter) {
+							If ($No_ESX -eq $ESX_Counter) {
+								LogTrace ("-- Appel de la fonction 'Get-ESX_Compare_Cibles'")
 								Get-ESX_Compare_Cibles
 								$ExcelWorkBook.Save()
+								
 								Break
 							}
 						}
@@ -1405,40 +1769,55 @@ ForEach ($vCenter in $TabVcc) {
 				}
 				
 				### Exécution des fonctions de récupération des données ESX
+				LogTrace ("-- Appel de la fonction 'Get-ESX_HARD'")
 				Get-ESX_HARD -vmHost $ESX		# Récupération matérielle
+				
+				LogTrace ("-- Appel de la fonction 'Get-ESX_CONFIG'")
 				Get-ESX_CONFIG -vmHost $ESX		# Récupération de la configuration matérielle
+				
+				LogTrace ("-- Appel de la fonction 'Get-ESX_SAN'")
 				Get-ESX_SAN -vmHost $ESX		# Récupération des données stockage SAN
+				
+				LogTrace ("-- Appel de la fonction 'Get-ESX_HOST'")
 				Get-ESX_HOST -vmHost $ESX		# Récupération de la configuration ESXi
+				
+				LogTrace ("-- Appel de la fonction 'Get-ESX_NETWORK'")
 				Get-ESX_NETWORK -vmHost $ESX	# Récupération de la configuration réseaux
+				
+				LogTrace ("-- Appel de la fonction 'Get-HP_ILO'")
 				Get-HP_ILO -vmHost $ESX			# Récupération de la configuration iLO
 				
 				### Enregistrement des modifications Excel
 				$ExcelWorkBook.Save()
 
 				$EndTime = Get-Date -Format HH:mm:ss
-				LogTrace ("MISE A JOUR des données pour l'ESXi '$ESX'. Zone [L$ExcelLine_Start..$($ExcelLine_Start + $ESX_Counter - 1) *L$($no_inc_ESX + 1)*]..." + $vbcrlf)
+				LogTrace ("MISE A JOUR des données pour l'ESXi '$ESX'. Zone [L$ExcelLine_Start..$($ExcelLine_Start + $ESX_Counter - 1) *L$($No_INC_ESX + 1)*]..." + $VBCrLF)
 				Write-Host "[$EndTime] Mise à jour des données Excel " -NoNewLine
-				Write-Host "Zone [L$ExcelLine_Start..$($ExcelLine_Start + $ESX_Counter - 1) *L$($no_inc_ESX + 1)*]... "  -ForegroundColor Yellow -NoNewLine
+				Write-Host "Zone [L$ExcelLine_Start..$($ExcelLine_Start + $ESX_Counter - 1) *L$($No_INC_ESX + 1)*]... " -ForegroundColor Yellow -NoNewLine
 				Write-Host "Terminée`r`n" -ForegroundColor Black -BackgroundColor White
 
 				# Dans le cas d'une découverte complète du périmètre
 				If ($Mode_Var -eq 1) {
-					If ($no_ESX -eq $($oESX.Count)) {
-						Get-ESX_Compare_Full; $ExcelWorkBook.Save()
+					If ($No_ESX -eq $($oESX.Count)) {
+						LogTrace ("-- Appel de la fonction 'Get-ESX_Compare_Full'")
+						Get-ESX_Compare_Full
+						$ExcelWorkBook.Save()
 					}
 				}
 				
 				### Sélection de la fonction selon le mode de départ
 				If ($Mode_Var -eq 2) {
-					If (Test-Path ($RepLog + $ScriptName + "_REF.xlsx")) {	# Dans le cas d'une vérification de conformité unitaire si le fichier Excel de référence existe
-						If ($no_ESX -eq $ESX_Counter) {
+					If (Test-Path ($RepLog + $ScriptName + $File_XLSX_DISCOVER)) {	# Dans le cas d'une vérification de conformité unitaire si le fichier Excel de référence existe
+						If ($No_ESX -eq $ESX_Counter) {
+							LogTrace ("-- Appel de la fonction 'Get-ESX_Compare_CiblesvsReference'")
 							Get-ESX_Compare_CiblesvsReference
 							$ExcelWorkBook.Save()
 							Break
 						}
 					}
 					Else {	# Dans le cas d'une vérification de conformité unitaire si le fichier Excel de référence n'existe pas
-						If ($no_ESX -eq $ESX_Counter) {
+						If ($No_ESX -eq $ESX_Counter) {
+							LogTrace ("-- Appel de la fonction 'Get-ESX_Compare_Cibles'")
 							Get-ESX_Compare_Cibles
 							$ExcelWorkBook.Save()
 							Break
@@ -1450,26 +1829,57 @@ ForEach ($vCenter in $TabVcc) {
 	}
 	
 	### Exécution des fonctions de récupération des valeurs ESX
-	If ($Mode_Var -eq 1) { Get-Cluster_Compare }
+	If ($Mode_Var -eq 1) {
+		LogTrace ("-- Appel de la fonction 'Get-Cluster_Compare'")
+		Get-Cluster_Compare
+	}
 	
 	LogTrace ("DECONNEXION et FIN du traitement depuis le VCENTER '$vCenter'`r`n")
 	Disconnect-VIServer -Server $vCenter -Force -Confirm:$False
 }
 
 $ExcelWorkBook.Save()
-$ExcelWorkBook_Ref.Save()
-Write-Host "Fermeture du classeur Excel [Terminé]"
-LogTrace ("Fermeture du classeur Excel [Terminé]")
 
+Write-Host "Enregistrement final du classeur Excel [Terminé]"
+LogTrace ("Enregistrement final du classeur Excel [Terminé]")
+
+### Exécution de la conversion du fichier XLS en CSV uniquement en mode découverte
+If ($Mode_Var -eq 1) {
+	LogTrace ("-- Appel de la fonction 'ConvertXLS2CSV'")
+	ConvertXLS2CSV
+}
+
+### FIN du programme Excel
 $Excel.Quit()
-Write-Host "Fermeture du programme Excel [Terminé]"
-LogTrace ("Fermeture du programme Excel [Terminé]")
 
 Start-Sleep -s 5
-#Send_Mail; Write-Host "Envoi du mail avec les fichiers LOG et XLSX"
 
-# Renommage du fichier _REF-work vers le fichier _REF.xlsx
-If ($Mode_Var -eq 1) { Move-Item ($RepLog + $ScriptName + "_REF-work.xlsx") ($RepLog + $ScriptName + "_REF.xlsx") }
+### Exécution de l'envoi du mail
+LogTrace ("-- Appel de la fonction 'Send_Mail'")
+Send_Mail
+Write-Host "Envoi du mail avec les fichiers LOG et XLSX [Terminé]..." -ForegroundColor White
+LogTrace ("Envoi du mail avec les fichiers LOG et XLSX [Terminé]...")
+
+### Sauvegarde du précédent fichier _REF.xlsx, _REF.log et _REF.csv
+If (($Global:Reponse -eq "Yes") -or ($Global:Reponse -eq "Oui")) {
+	Move-Item ($RepLog + $ScriptName + $File_XLSX_DISCOVER) ($RepLog + $ScriptName + $File_XLSX_DISCOVER_bckp)		# Sauvegarde du précédent fichier _REF.xlsx
+	If (Test-Path ($RepLog + $ScriptName + $File_LOG_DISCOVER)) { Move-Item ($RepLog + $ScriptName + $File_LOG_DISCOVER) ($RepLog + $ScriptName + $File_LOG_DISCOVER_bckp) }	# Si le fichier existe, sauvegarde du précédent fichier _REF.log
+	If (Test-Path ($RepLog + $ScriptName + $File_CSV_DISCOVER)) { Move-Item ($RepLog + $ScriptName + $File_CSV_DISCOVER) ($RepLog + $ScriptName + $File_CSV_DISCOVER_bckp)	}	# Si le fichier existe, sauvegarde du précédent fichier _REF.csv
+	
+	Write-Host "Le fichier '$($RepLog + $ScriptName + $File_XLSX_DISCOVER)' (XLSX + LOG + CSV) a été sauvegardé" -ForegroundColor Red
+	LogTrace ("Le fichier '$($RepLog + $ScriptName + $File_XLSX_DISCOVER)' (XLSX + LOG + CSV) a été sauvegardé")
+}
+	
+### Renommage du fichier _REF-work vers le fichier _REF uniquement en mode découverte
+If ($Mode_Var -eq 1) {
+	Move-Item ($RepLog + $ScriptName + $File_XLSX_DISCOVER_work) ($RepLog + $ScriptName + $File_XLSX_DISCOVER)
+	Move-Item ($RepLog + $ScriptName + $File_LOG_DISCOVER_work) ($RepLog + $ScriptName + $File_LOG_DISCOVER)
+}
+
+LogTrace ("Suppression du fichier LOCK")
+Remove-Item -Path ($RepLog + $ScriptName + $File_PROCESS_LOCK) -Force
 
 Write-Host -NoNewLine "FIN du script. Appuyer sur une touche pour quitter...`r`n"
-$NULL = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+$Null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+
+### FIN du script
